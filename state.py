@@ -20,9 +20,12 @@ def load_state():
             "daily_loss_date": _today(),
             "open_positions": 0,
             "executed_trades": [],
+            "open_lots": {},  # token_id -> {"entry_price", "size_usdc", "wallet", "condition_id"}
         }
     with open(STATE_FILE, "r") as f:
-        return json.load(f)
+        data = json.load(f)
+    data.setdefault("open_lots", {})
+    return data
 
 
 def save_state(state):

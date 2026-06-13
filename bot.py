@@ -33,6 +33,7 @@ from config import (
 from data_api import DataAPI
 from executor import Executor
 import state as st
+import notifier
 
 logging.basicConfig(
     level=logging.INFO,
@@ -128,10 +129,41 @@ def process_activity_item(data_api: DataAPI, executor: Executor, state: dict,
         "response": resp,
     })
 
+    open_lots = state.setdefault("open_lots", {})
+
     if side == "BUY":
         state["open_positions"] = state.get("open_positions", 0) + 1
+        # Track this lot so we can compute P&L when it's sold
+        open_lots[token_id] = {
+            "entry_price": price,
+            "size_usdc": your_size,
+            "wallet": wallet,
+            "condition_id": condition_id,
+        }
+        notifier.notify_trade_opened(
+            wallet, side, condition_id, token_id, price, your_size, DRY_RUN
+        )
+
     elif side == "SELL":
         state["open_positions"] = max(0, state.get("open_positions", 0) - 1)
+        lot = open_lots.pop(token_id, None)
+        if lot:
+            entry_price = lot["entry_price"]
+            lot_size_usdc = lot["size_usdc"]
+            # P&L: token quantity bought at entry, sold at current price
+            token_qty = lot_size_usdc / entry_price if entry_price else 0
+            exit_value = token_qty * price
+            pnl_usdc = exit_value - lot_size_usdc
+            notifier.notify_trade_closed(
+                wallet, condition_id, token_id, entry_price, price,
+                lot_size_usdc, pnl_usdc, DRY_RUN,
+            )
+        else:
+            # We have no record of opening this position (e.g. bot restarted,
+            # or this SELL just closes a position we never copied the BUY for).
+            notifier.notify_trade_opened(
+                wallet, side, condition_id, token_id, price, your_size, DRY_RUN
+            )
 
     st.mark_seen(state, tx_hash)
 

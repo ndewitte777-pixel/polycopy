@@ -50,6 +50,21 @@ Go to your service → **Variables** tab → add:
 | `TARGET_WALLETS` | `0xaaa...,0xbbb...,0xccc...` | Comma-separated, no spaces, lowercase |
 | `DRY_RUN` | `true` | Keep `true` until you've watched logs for a while |
 | `PRIVATE_KEY` | (leave empty for now) | Only set when going live |
+| `PUSHOVER_TOKEN` | your Pushover Application token | Optional, for trade notifications |
+| `PUSHOVER_USER` | your Pushover User Key | Optional, for trade notifications |
+
+### Pushover setup (optional)
+
+1. Install the Pushover app (iOS/Android) and create an account.
+2. Your **User Key** is shown on your Pushover dashboard homepage.
+3. Create an Application/API token: dashboard → **Create an Application/API Token**
+   → name it (e.g. "Polycopy") → copy the generated token.
+4. Add both as Railway variables above.
+
+Once set, you'll get a push notification every time the bot opens a copied
+trade, and another when that position closes, showing win/loss and P&L.
+This works even in `DRY_RUN=true` mode (labeled "[DRY RUN]") so you can test
+notifications before going live.
 
 Click **Deploy** (or it auto-redeploys on variable changes).
 
