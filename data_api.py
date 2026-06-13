@@ -15,13 +15,20 @@ class DataAPI:
         self.session = session or requests.Session()
 
     # ---------------------------------------------------------------
-    def get_leaderboard(self, limit=20, period="month", order_by="pnl"):
+    def get_leaderboard(self, limit=20, time_period="MONTH", order_by="PNL", category="OVERALL"):
         """
         Fetch top traders.
-        order_by: 'pnl' or 'volume' (API specifics may vary; adjust as needed).
+        time_period: DAY, WEEK, MONTH, ALL
+        order_by: PNL or VOL
+        category: OVERALL, POLITICS, SPORTS, CRYPTO, CULTURE, MENTIONS, WEATHER, ECONOMICS, TECH, FINANCE
         """
-        url = f"{DATA_API_URL}/leaderboard"
-        params = {"limit": limit}
+        url = f"{DATA_API_URL}/v1/leaderboard"
+        params = {
+            "limit": limit,
+            "timePeriod": time_period,
+            "orderBy": order_by,
+            "category": category,
+        }
         try:
             r = self.session.get(url, params=params, timeout=10)
             r.raise_for_status()

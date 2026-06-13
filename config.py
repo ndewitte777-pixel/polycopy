@@ -20,9 +20,14 @@ POLL_INTERVAL_SECONDS = 10        # how often to check for new activity
 ACTIVITY_LOOKBACK_SECONDS = 120   # window to consider "new"
 
 # ---- Filters ----
-MIN_TRADE_USDC = 50          # ignore trades smaller than this (their size)
+MIN_TRADE_USDC = 200         # ignore trades smaller than this (their size) -
+                              # filters out market-maker micro-trades
 MIN_MARKET_LIQUIDITY = 1000  # skip markets with less liquidity than this (USDC)
 ONLY_COPY_BUYS = False        # if True, ignore SELL/close activity
+
+# If the same wallet trades the same token again within this many seconds,
+# skip it (prevents repeatedly "opening" the same position on rapid-fire trades)
+SAME_TOKEN_COOLDOWN_SECONDS = 3600
 
 # ---- Position sizing ----
 # Fraction of YOUR bankroll to allocate per copied trade,

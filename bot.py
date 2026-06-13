@@ -27,6 +27,7 @@ from config import (
     MAX_TRADE_USDC,
     MAX_DAILY_LOSS_USDC,
     MAX_OPEN_POSITIONS,
+    SAME_TOKEN_COOLDOWN_SECONDS,
     DRY_RUN,
     LOG_FILE,
 )
@@ -103,6 +104,15 @@ def process_activity_item(data_api: DataAPI, executor: Executor, state: dict,
         st.mark_seen(state, tx_hash)
         return
 
+    # --- Cooldown: skip if we already hold/recently opened this exact token ---
+    open_lots = state.setdefault("open_lots", {})
+    if side == "BUY" and token_id in open_lots:
+        last_ts = open_lots[token_id].get("opened_at", 0)
+        if time.time() - last_ts < SAME_TOKEN_COOLDOWN_SECONDS:
+            log.info("Skipping repeat BUY on token already held (cooldown): %s", token_id)
+            st.mark_seen(state, tx_hash)
+            return
+
     # --- Position sizing ---
     trader_fraction = usdc_size / trader_bankroll if trader_bankroll else 0
     your_size = your_bankroll * trader_fraction * COPY_SCALE_FACTOR
@@ -129,8 +139,6 @@ def process_activity_item(data_api: DataAPI, executor: Executor, state: dict,
         "response": resp,
     })
 
-    open_lots = state.setdefault("open_lots", {})
-
     if side == "BUY":
         state["open_positions"] = state.get("open_positions", 0) + 1
         # Track this lot so we can compute P&L when it's sold
@@ -139,6 +147,7 @@ def process_activity_item(data_api: DataAPI, executor: Executor, state: dict,
             "size_usdc": your_size,
             "wallet": wallet,
             "condition_id": condition_id,
+            "opened_at": time.time(),
         }
         notifier.notify_trade_opened(
             wallet, side, condition_id, token_id, price, your_size, DRY_RUN
