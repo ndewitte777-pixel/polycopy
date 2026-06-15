@@ -179,7 +179,7 @@ def time_remaining_str(end_date: str) -> str:
         return end_date
 
 
-def ask_claude(market: dict) -> dict | None:
+def ask_claude(market: dict, live_game_context: str = "") -> dict | None:
     """Ask Claude to evaluate a single market. Returns decision dict or None on error."""
     if not ANTHROPIC_API_KEY:
         return None
@@ -212,6 +212,11 @@ def ask_claude(market: dict) -> dict | None:
     liquidity = float(market.get("liquidity", 0) or 0)
     volume = float(market.get("volume", 0) or 0)
 
+    # Add live game context if available
+    live_context_str = ""
+    if live_game_context:
+        live_context_str = f"\n\nLIVE GAME DATA:\n{live_game_context}"
+
     prompt = MARKET_PROMPT_TEMPLATE.format(
         question=question,
         category=category or "General",
@@ -221,7 +226,7 @@ def ask_claude(market: dict) -> dict | None:
         time_remaining=time_remaining_str(end_date),
         liquidity=liquidity,
         volume=volume,
-        description=description or "No additional description provided.",
+        description=(description or "No additional description.") + live_context_str,
     )
 
     try:
@@ -293,17 +298,22 @@ def run_claude_trader(executor, state: dict, session: requests.Session,
     Scans markets, asks Claude for opinions, places bets on high-edge opportunities.
     Returns number of trades placed.
     """
+    from sports_data import fetch_all_live_games, match_game_to_market, format_game_context
+
     log.info("Claude trader: scanning markets...")
     markets = fetch_active_markets(session)
     if not markets:
         return 0
+
+    # Fetch all live games for context
+    live_games = fetch_all_live_games(session)
+    log.info("Found %d live games for context", len(live_games))
 
     trades_placed = 0
     skipped = 0
     passed = 0
 
     for market in markets:
-        # Rate limit Claude API calls — don't hammer it
         time.sleep(1.5)
 
         question = market.get("question") or market.get("title", "")
@@ -311,7 +321,17 @@ def run_claude_trader(executor, state: dict, session: requests.Session,
         if price <= 0 or price >= 1:
             continue
 
-        decision = ask_claude(market)
+        # Match live game context to this market
+        live_context = ""
+        best_match_score = 0.0
+        for game in live_games:
+            score = match_game_to_market(game, question)
+            if score > best_match_score:
+                best_match_score = score
+                if score >= 0.4:
+                    live_context = format_game_context(game)
+
+        decision = ask_claude(market, live_context)
         if not decision:
             continue
 

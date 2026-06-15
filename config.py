@@ -52,6 +52,12 @@ CLAUDE_TRADER_MIN_LIQUIDITY = float(os.environ.get("CLAUDE_TRADER_MIN_LIQUIDITY"
 CLAUDE_MIN_EDGE = float(os.environ.get("CLAUDE_MIN_EDGE", "0.08"))
 
 # Minimum number of target wallets that must buy the same token within
+# ---- Live game scalping ----
+USE_LIVE_SCALPER = os.environ.get("USE_LIVE_SCALPER", "true").lower() == "true"
+LIVE_POLL_INTERVAL = int(os.environ.get("LIVE_POLL_INTERVAL", "20"))  # seconds between live checks
+SCALP_PROFIT_PCT = float(os.environ.get("SCALP_PROFIT_PCT", "15.0"))  # % gain to trigger scalp exit
+SCALP_MIN_CENTS = float(os.environ.get("SCALP_MIN_CENTS", "0.05"))    # $0.05 absolute price gain
+
 # CONVICTION_WINDOW_SECONDS to trigger a "high conviction" multiplier.
 CONVICTION_THRESHOLD = 2          # e.g. 2+ wallets buying same token = strong signal
 CONVICTION_WINDOW_SECONDS = 3600  # window to look for matching buys

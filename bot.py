@@ -46,6 +46,8 @@ from config import (
     CLAUDE_MIN_CONFIDENCE,
     USE_CLAUDE_TRADER,
     CLAUDE_TRADER_INTERVAL,
+    USE_LIVE_SCALPER,
+    LIVE_POLL_INTERVAL,
     KELLY_FRACTION,
     ALLOWED_CATEGORIES,
     MAX_CATEGORY_EXPOSURE_PCT,
@@ -64,6 +66,8 @@ import state as st
 import notifier
 import claude_filter as cf
 import claude_trader as ct
+import scalper as sc
+import sports_data as sd
 
 logging.basicConfig(
     level=logging.INFO,
@@ -480,9 +484,10 @@ def run():
 
     log.info(
         "Starting Polymarket copy bot. DRY_RUN=%s | Claude filter=%s | "
-        "Claude trader=%s (every %dh) | targets=%s",
+        "Claude trader=%s (every %dh) | Live scalper=%s (every %ds) | targets=%s",
         DRY_RUN, USE_CLAUDE_FILTER, USE_CLAUDE_TRADER,
-        CLAUDE_TRADER_INTERVAL // 3600, TARGET_WALLETS,
+        CLAUDE_TRADER_INTERVAL // 3600, USE_LIVE_SCALPER,
+        LIVE_POLL_INTERVAL, TARGET_WALLETS,
     )
 
     data_api = DataAPI()
@@ -496,7 +501,9 @@ def run():
     last_signal_time = time.time()
     last_monitor_time = 0.0
     last_balance_check = time.time()
-    last_claude_trader_time = 0.0  # start at 0 so it runs on first loop
+    last_claude_trader_time = 0.0
+    last_live_poll_time = 0.0
+    live_games_cache = []
     BALANCE_REFRESH_SECONDS = 3600
     consecutive_errors = 0
 
@@ -533,6 +540,23 @@ def run():
                         your_bankroll, trader_bankroll,
                     )
                     last_signal_time = now
+
+            # ── Live scalper (fast exits on live sports) ──────────────
+            if USE_LIVE_SCALPER and now - last_live_poll_time >= LIVE_POLL_INTERVAL:
+                live_games_cache = sd.fetch_all_live_games(session)
+                open_lots = state.setdefault("open_lots", {})
+                if open_lots and live_games_cache:
+                    scalps = sc.run_scalper(
+                        open_lots=open_lots,
+                        executor=executor,
+                        state=state,
+                        session=session,
+                        live_games=live_games_cache,
+                        notifier=notifier,
+                    )
+                    if scalps:
+                        log.info("Scalper: %d positions exited", scalps)
+                last_live_poll_time = now
 
             # ── Position monitor (take-profit / stops / time-decay) ───────
             if now - last_monitor_time >= POSITION_MONITOR_INTERVAL:
