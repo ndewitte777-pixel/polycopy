@@ -52,6 +52,24 @@ POLYGON_CHAIN_ID = 137
 DATA_API_URL = "https://data-api.polymarket.com"
 GAMMA_API_URL = "https://gamma-api.polymarket.com"
 
-# ---- Logging ----
-LOG_FILE = "polycopy.log"
-STATE_FILE = "state.json"
+# ---- Your account ----
+# Set this to your actual Polymarket USDC balance (or planned bankroll) for
+# accurate position sizing. Can be overridden via env var.
+YOUR_BANKROLL_USDC = float(os.environ.get("YOUR_BANKROLL_USDC", "100"))
+
+# ---- Logging / persistence ----
+# DATA_DIR: if you've attached a Railway Volume, set DATA_DIR=/data as an env
+# var so state survives restarts/redeploys. Defaults to local (ephemeral) dir.
+DATA_DIR = os.environ.get("DATA_DIR", ".")
+LOG_FILE = os.path.join(DATA_DIR, "polycopy.log")
+STATE_FILE = os.path.join(DATA_DIR, "state.json")
+
+# ---- Heartbeat ----
+# Send a Pushover notification if NO target wallet has shown qualifying
+# activity for this many seconds (default 24h). Set to 0 to disable.
+HEARTBEAT_SILENCE_SECONDS = int(os.environ.get("HEARTBEAT_SILENCE_SECONDS", str(24 * 3600)))
+
+# ---- Error alerting ----
+# Send a Pushover notification after this many CONSECUTIVE main-loop errors
+# (to avoid spamming on a single transient blip).
+ERROR_ALERT_THRESHOLD = int(os.environ.get("ERROR_ALERT_THRESHOLD", "3"))

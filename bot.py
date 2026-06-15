@@ -28,6 +28,9 @@ from config import (
     MAX_DAILY_LOSS_USDC,
     MAX_OPEN_POSITIONS,
     SAME_TOKEN_COOLDOWN_SECONDS,
+    YOUR_BANKROLL_USDC,
+    HEARTBEAT_SILENCE_SECONDS,
+    ERROR_ALERT_THRESHOLD,
     DRY_RUN,
     LOG_FILE,
 )
@@ -106,8 +109,9 @@ def process_activity_item(data_api: DataAPI, executor: Executor, state: dict,
 
     # --- Cooldown: skip if we already hold/recently opened this exact token ---
     open_lots = state.setdefault("open_lots", {})
-    if side == "BUY" and token_id in open_lots:
-        last_ts = open_lots[token_id].get("opened_at", 0)
+    lots_for_token = open_lots.get(token_id, [])
+    if side == "BUY" and lots_for_token:
+        last_ts = lots_for_token[-1].get("opened_at", 0)
         if time.time() - last_ts < SAME_TOKEN_COOLDOWN_SECONDS:
             log.info("Skipping repeat BUY on token already held (cooldown): %s", token_id)
             st.mark_seen(state, tx_hash)
@@ -119,60 +123,144 @@ def process_activity_item(data_api: DataAPI, executor: Executor, state: dict,
     your_size = min(your_size, MAX_TRADE_USDC)
     your_size = max(your_size, 1.0)  # Polymarket has small minimums; adjust if needed
 
+    # --- Resolve human-readable market info ---
+    market_info = data_api.get_market_info(condition_id, token_id) if condition_id else {
+        "question": "Unknown market",
+        "outcome": "Unknown outcome",
+        "url": "",
+        "end_date": "",
+        "liquidity": 0,
+    }
+
     log.info(
-        "COPY SIGNAL | wallet=%s side=%s market=%s token=%s price=%.3f "
-        "their_usdc=%.2f their_fraction=%.4f -> your_size=%.2f",
-        wallet, side, condition_id, token_id, price, usdc_size, trader_fraction, your_size,
+        "COPY SIGNAL | wallet=%s side=%s\n"
+        "  Market:  %s\n"
+        "  Betting: %s @ %.3f (%s)\n"
+        "  Their size: $%.2f (%.2f%% of bankroll) -> Your size: $%.2f\n"
+        "  Closes: %s | Liquidity: $%.0f\n"
+        "  %s",
+        wallet, side,
+        market_info["question"],
+        market_info["outcome"], price, "YES/NO implied" if price < 1 else "",
+        usdc_size, trader_fraction * 100, your_size,
+        market_info["end_date"] or "unknown",
+        market_info["liquidity"],
+        market_info["url"],
     )
 
-    resp = executor.place_order(token_id=token_id, side=side, price=price, size_usdc=your_size)
-
-    st.record_trade(state, {
-        "tx_hash": tx_hash,
-        "wallet": wallet,
-        "side": side,
-        "token_id": token_id,
-        "condition_id": condition_id,
-        "price": price,
-        "size_usdc": your_size,
-        "timestamp": item.get("timestamp"),
-        "response": resp,
-    })
-
     if side == "BUY":
+        resp = executor.place_order(token_id=token_id, side=side, price=price, size_usdc=your_size)
+        st.record_trade(state, {
+            "tx_hash": tx_hash,
+            "wallet": wallet,
+            "side": side,
+            "token_id": token_id,
+            "condition_id": condition_id,
+            "price": price,
+            "size_usdc": your_size,
+            "timestamp": item.get("timestamp"),
+            "response": resp,
+        })
+
         state["open_positions"] = state.get("open_positions", 0) + 1
         # Track this lot so we can compute P&L when it's sold
-        open_lots[token_id] = {
+        lots_for_token.append({
             "entry_price": price,
             "size_usdc": your_size,
             "wallet": wallet,
             "condition_id": condition_id,
+            "market_info": market_info,
             "opened_at": time.time(),
-        }
+        })
+        open_lots[token_id] = lots_for_token
         notifier.notify_trade_opened(
-            wallet, side, condition_id, token_id, price, your_size, DRY_RUN
+            wallet, side, market_info, price, your_size, DRY_RUN
         )
 
     elif side == "SELL":
-        state["open_positions"] = max(0, state.get("open_positions", 0) - 1)
-        lot = open_lots.pop(token_id, None)
-        if lot:
-            entry_price = lot["entry_price"]
-            lot_size_usdc = lot["size_usdc"]
-            # P&L: token quantity bought at entry, sold at current price
-            token_qty = lot_size_usdc / entry_price if entry_price else 0
-            exit_value = token_qty * price
-            pnl_usdc = exit_value - lot_size_usdc
-            notifier.notify_trade_closed(
-                wallet, condition_id, token_id, entry_price, price,
-                lot_size_usdc, pnl_usdc, DRY_RUN,
-            )
-        else:
+        if not lots_for_token:
             # We have no record of opening this position (e.g. bot restarted,
             # or this SELL just closes a position we never copied the BUY for).
-            notifier.notify_trade_opened(
-                wallet, side, condition_id, token_id, price, your_size, DRY_RUN
+            log.info("SELL signal for token with no tracked open lots: %s", token_id)
+            st.mark_seen(state, tx_hash)
+            return
+
+        # Determine what fraction of THEIR position this sell represents,
+        # so we close the same fraction of OUR lots (handles partial sells).
+        sold_qty = float(item.get("size", 0) or 0)
+        remaining_positions = data_api.get_positions(wallet)
+        their_remaining_qty = 0.0
+        if isinstance(remaining_positions, list):
+            for p in remaining_positions:
+                if (p.get("asset") or p.get("tokenId")) == token_id:
+                    try:
+                        their_remaining_qty = float(p.get("size", 0) or 0)
+                    except (TypeError, ValueError):
+                        their_remaining_qty = 0.0
+                    break
+
+        # Fraction of their pre-sell position that this trade sold
+        their_pre_sell_qty = their_remaining_qty + sold_qty
+        sell_fraction = (sold_qty / their_pre_sell_qty) if their_pre_sell_qty > 0 else 1.0
+        sell_fraction = min(max(sell_fraction, 0.0), 1.0)
+
+        total_lot_size = sum(l["size_usdc"] for l in lots_for_token)
+        total_pnl = 0.0
+        remaining_lots = []
+
+        for lot in lots_for_token:
+            entry_price = lot["entry_price"]
+            lot_market_info = lot.get("market_info", market_info)
+            close_size_usdc = lot["size_usdc"] * sell_fraction
+            remaining_size_usdc = lot["size_usdc"] - close_size_usdc
+
+            if close_size_usdc > 0:
+                token_qty = close_size_usdc / entry_price if entry_price else 0
+                exit_value = token_qty * price
+                pnl_usdc = exit_value - close_size_usdc
+                total_pnl += pnl_usdc
+                notifier.notify_trade_closed(
+                    wallet, lot_market_info, entry_price, price,
+                    close_size_usdc, pnl_usdc, DRY_RUN,
+                )
+
+            if remaining_size_usdc > 0.01:  # keep lot open if meaningfully remains
+                lot["size_usdc"] = remaining_size_usdc
+                remaining_lots.append(lot)
+
+        if remaining_lots:
+            open_lots[token_id] = remaining_lots
+        else:
+            open_lots.pop(token_id, None)
+            state["open_positions"] = max(0, state.get("open_positions", 0) - 1)
+
+        # Track realized losses against the daily loss limit
+        if total_pnl < 0:
+            state["daily_loss"] = state.get("daily_loss", 0.0) + abs(total_pnl)
+
+        log.info(
+            "SELL processed | wallet=%s token=%s sell_fraction=%.3f total_pnl=%.2f "
+            "remaining_lots=%d",
+            wallet, token_id, sell_fraction, total_pnl, len(remaining_lots),
+        )
+
+        # Execute the proportional sell on your side too
+        your_sell_size = total_lot_size * sell_fraction
+        if your_sell_size > 0:
+            resp = executor.place_order(
+                token_id=token_id, side="SELL", price=price, size_usdc=your_sell_size
             )
+            st.record_trade(state, {
+                "tx_hash": tx_hash,
+                "wallet": wallet,
+                "side": side,
+                "token_id": token_id,
+                "condition_id": condition_id,
+                "price": price,
+                "size_usdc": your_sell_size,
+                "timestamp": item.get("timestamp"),
+                "response": resp,
+            })
 
     st.mark_seen(state, tx_hash)
 
@@ -188,8 +276,8 @@ def run():
     executor = Executor()
     state = st.load_state()
 
-    # TODO: replace with real bankroll lookup for your own account
-    your_bankroll = 100.0
+    your_bankroll = YOUR_BANKROLL_USDC
+    log.info("Using bankroll: $%.2f", your_bankroll)
 
     while True:
         try:

@@ -43,33 +43,61 @@ def send(title: str, message: str, priority: int = 0):
         log.warning("Pushover notification error: %s", e)
 
 
-def notify_trade_opened(wallet, side, condition_id, token_id, price, size_usdc, dry_run):
+def notify_trade_opened(wallet, side, market_info: dict, price, size_usdc, dry_run):
     prefix = "[DRY RUN] " if dry_run else ""
+    question = market_info.get("question", "Unknown market")
+    outcome = market_info.get("outcome", "?")
+    end_date = market_info.get("end_date", "")
+    url = market_info.get("url", "")
     send(
-        title=f"{prefix}Trade Opened: {side}",
+        title=f"{prefix}{'📈' if side == 'BUY' else '📉'} {side}: {outcome}",
         message=(
-            f"Copying {wallet[:8]}...\n"
-            f"Side: {side}\n"
-            f"Price: {price:.3f}\n"
+            f"{question}\n\n"
+            f"Bet: {outcome} @ {price:.3f} (implied {price*100:.1f}%)\n"
             f"Size: ${size_usdc:.2f}\n"
-            f"Market: {condition_id[:10] if condition_id else 'unknown'}..."
+            f"Trader: {wallet[:8]}...\n"
+            f"Closes: {end_date or 'unknown'}\n"
+            f"{url}"
         ),
     )
 
 
-def notify_trade_closed(wallet, condition_id, token_id, entry_price, exit_price,
+def notify_no_activity(hours: float, wallets: list):
+    send(
+        title="No copy signals recently",
+        message=(
+            f"No qualifying trades detected from any target wallet in "
+            f"~{hours:.1f}h.\nWallets: {', '.join(w[:8] + '...' for w in wallets)}\n"
+            f"Bot is still running — this just means it's been quiet."
+        ),
+    )
+
+
+def notify_error(message: str):
+    send(
+        title="⚠️ Polycopy bot error",
+        message=message,
+        priority=1,
+    )
+
+
+def notify_trade_closed(wallet, market_info: dict, entry_price, exit_price,
                          size_usdc, pnl_usdc, dry_run):
     prefix = "[DRY RUN] " if dry_run else ""
     result = "WIN" if pnl_usdc > 0 else ("LOSS" if pnl_usdc < 0 else "BREAKEVEN")
     emoji = "✅" if pnl_usdc > 0 else ("❌" if pnl_usdc < 0 else "➖")
+    question = market_info.get("question", "Unknown market")
+    outcome = market_info.get("outcome", "?")
+    url = market_info.get("url", "")
     send(
-        title=f"{prefix}{emoji} Trade Closed: {result}",
+        title=f"{prefix}{emoji} {result}: {outcome}",
         message=(
-            f"Following {wallet[:8]}...\n"
-            f"Entry: {entry_price:.3f} -> Exit: {exit_price:.3f}\n"
-            f"Size: ${size_usdc:.2f}\n"
-            f"P&L: ${pnl_usdc:+.2f}\n"
-            f"Market: {condition_id[:10] if condition_id else 'unknown'}..."
+            f"{question}\n\n"
+            f"Outcome: {outcome}\n"
+            f"Entry: {entry_price:.3f} → Exit: {exit_price:.3f}\n"
+            f"Size: ${size_usdc:.2f} | P&L: ${pnl_usdc:+.2f}\n"
+            f"Trader: {wallet[:8]}...\n"
+            f"{url}"
         ),
         priority=0,
     )
