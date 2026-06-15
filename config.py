@@ -82,7 +82,10 @@ DRY_RUN = os.environ.get("DRY_RUN", "true").lower() != "false"
 # Add all three as Railway environment variables - never commit them to git
 CLOB_API_KEY        = os.environ.get("CLOB_API_KEY", "")
 CLOB_API_SECRET     = os.environ.get("CLOB_API_SECRET", "")
-CLOB_API_PASSPHRASE = os.environ.get("CLOB_API_PASSPHRASE", "")  # may be empty, that's ok
+CLOB_API_PASSPHRASE = os.environ.get("CLOB_API_PASSPHRASE", "")
+
+CLOB_API_URL     = "https://clob.polymarket.com"
+POLYGON_CHAIN_ID = 137
 
 # ---- Data API ----
 DATA_API_URL = "https://data-api.polymarket.com"
