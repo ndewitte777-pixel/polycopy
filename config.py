@@ -77,10 +77,12 @@ MAX_CATEGORY_EXPOSURE_PCT = 40.0   # e.g. 40 = max 40% in sports markets at once
 # ---- Execution ----
 DRY_RUN = os.environ.get("DRY_RUN", "true").lower() != "false"
 
-# ---- Wallet / credentials (CLOB) ----
-PRIVATE_KEY = os.environ.get("PRIVATE_KEY", "")
-CLOB_API_URL = "https://clob.polymarket.com"
-POLYGON_CHAIN_ID = 137
+# ---- Polymarket API credentials ----
+# Get these from polymarket.com -> Profile -> API Keys
+# Add all three as Railway environment variables - never commit them to git
+CLOB_API_KEY        = os.environ.get("CLOB_API_KEY", "")
+CLOB_API_SECRET     = os.environ.get("CLOB_API_SECRET", "")
+CLOB_API_PASSPHRASE = os.environ.get("CLOB_API_PASSPHRASE", "")  # may be empty, that's ok
 
 # ---- Data API ----
 DATA_API_URL = "https://data-api.polymarket.com"
