@@ -4,9 +4,13 @@ In DRY_RUN mode, no real client is created and orders are only logged.
 """
 
 import logging
-from config import PRIVATE_KEY, CLOB_API_URL, POLYGON_CHAIN_ID, DRY_RUN
+import requests
+from config import PRIVATE_KEY, CLOB_API_URL, POLYGON_CHAIN_ID, DRY_RUN, YOUR_BANKROLL_USDC
 
 log = logging.getLogger("polycopy.executor")
+
+# Polygon USDC contract address
+USDC_CONTRACT = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
 
 
 class Executor:
@@ -34,11 +38,73 @@ class Executor:
         log.info("CLOB client initialized (LIVE TRADING ENABLED)")
 
     # ------------------------------------------------------------
+    def get_balance(self) -> float:
+        """
+        Fetch real USDC balance from Polymarket CLOB.
+        Returns YOUR_BANKROLL_USDC as fallback in dry-run or on error.
+        """
+        if DRY_RUN:
+            return YOUR_BANKROLL_USDC
+
+        if not self.client:
+            return YOUR_BANKROLL_USDC
+
+        try:
+            balance_data = self.client.get_balance()
+            # py-clob-client returns balance in USDC (6 decimals on Polygon)
+            # May return a dict or a float depending on version
+            if isinstance(balance_data, dict):
+                raw = float(balance_data.get("balance", 0) or 0)
+            else:
+                raw = float(balance_data or 0)
+
+            # Convert from 6-decimal USDC units if needed
+            if raw > 1_000_000:
+                raw = raw / 1_000_000
+
+            log.info("Live wallet balance: $%.2f USDC", raw)
+            return raw if raw > 0 else YOUR_BANKROLL_USDC
+
+        except Exception as e:
+            log.warning("Could not fetch live balance, using config value: %s", e)
+            # Fallback: try fetching via Polygon RPC directly
+            try:
+                return self._get_balance_from_rpc()
+            except Exception:
+                return YOUR_BANKROLL_USDC
+
+    def _get_balance_from_rpc(self) -> float:
+        """Fallback: read USDC balance via Polygon RPC call."""
+        from py_clob_client.client import ClobClient
+        # Get wallet address from client
+        address = getattr(self.client, "address", None)
+        if not address:
+            return YOUR_BANKROLL_USDC
+
+        # ERC20 balanceOf(address) call
+        data = "0x70a08231" + address[2:].lower().zfill(64)
+        payload = {
+            "jsonrpc": "2.0",
+            "method": "eth_call",
+            "params": [{"to": USDC_CONTRACT, "data": data}, "latest"],
+            "id": 1,
+        }
+        resp = requests.post(
+            "https://polygon-rpc.com",
+            json=payload,
+            timeout=8,
+        )
+        result = resp.json().get("result", "0x0")
+        raw = int(result, 16) / 1_000_000  # USDC has 6 decimals
+        log.info("RPC wallet balance: $%.2f USDC", raw)
+        return raw if raw > 0 else YOUR_BANKROLL_USDC
+
+    # ------------------------------------------------------------
     def place_order(self, token_id: str, side: str, price: float, size_usdc: float):
         """
         Place a market order.
         side: 'BUY' or 'SELL'
-        price: current price (0-1) for the outcome token, used to compute token size
+        price: current price (0-1) for the outcome token
         size_usdc: amount in USDC to spend (for BUY) or notional to sell (for SELL)
         """
         if DRY_RUN:

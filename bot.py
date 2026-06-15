@@ -44,7 +44,7 @@ from config import (
     KELLY_FRACTION,
     ALLOWED_CATEGORIES,
     MAX_CATEGORY_EXPOSURE_PCT,
-    YOUR_BANKROLL_USDC,
+    YOUR_BANKROLL_USDC,  # used as fallback in executor.get_balance()
     HEARTBEAT_SILENCE_SECONDS,
     ERROR_ALERT_THRESHOLD,
     WEEKLY_REPORT_DAY,
@@ -451,16 +451,29 @@ def run():
     session = data_api.session
     state = st.load_state()
 
-    your_bankroll = YOUR_BANKROLL_USDC
-    log.info("Using bankroll: $%.2f", your_bankroll)
+    your_bankroll = executor.get_balance()
+    log.info("Starting bankroll: $%.2f USDC", your_bankroll)
 
     last_signal_time = time.time()
     last_monitor_time = 0.0
+    last_balance_check = time.time()
+    BALANCE_REFRESH_SECONDS = 3600  # re-fetch balance every hour
     consecutive_errors = 0
 
     while True:
         try:
             now = time.time()
+
+            # ── Refresh live balance hourly ───────────────────────────
+            if now - last_balance_check >= BALANCE_REFRESH_SECONDS:
+                new_balance = executor.get_balance()
+                if abs(new_balance - your_bankroll) > 0.01:
+                    log.info(
+                        "Balance updated: $%.2f -> $%.2f USDC",
+                        your_bankroll, new_balance,
+                    )
+                your_bankroll = new_balance
+                last_balance_check = now
 
             # ── Copy trade detection ──────────────────────────────────────
             for wallet in TARGET_WALLETS:
