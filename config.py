@@ -30,7 +30,27 @@ MAX_PRICE_SLIP_PCT = 15.0         # e.g. 15 means skip if price moved >15% from 
 # If the same wallet trades the same token again within this many seconds, skip
 SAME_TOKEN_COOLDOWN_SECONDS = 3600
 
-# ---- Conviction scoring ----
+# ---- Claude AI trade filter ----
+# Claude reviews each trade signal before it's placed and decides buy/skip.
+# Set USE_CLAUDE_FILTER=true in Railway Variables to enable.
+# ANTHROPIC_API_KEY is automatically available in claude.ai artifacts but
+# must be set as a Railway env var for the bot.
+USE_CLAUDE_FILTER = os.environ.get("USE_CLAUDE_FILTER", "false").lower() == "true"
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+CLAUDE_MODEL = "claude-sonnet-4-6"
+# Minimum confidence score (0-100) Claude must give to proceed with a trade
+CLAUDE_MIN_CONFIDENCE = int(os.environ.get("CLAUDE_MIN_CONFIDENCE", "60"))
+
+# ---- Claude autonomous trader ----
+# Claude independently scans markets and places its own bets
+USE_CLAUDE_TRADER = os.environ.get("USE_CLAUDE_TRADER", "false").lower() == "true"
+# How often Claude scans for its own trade ideas (seconds). Default 4 hours.
+CLAUDE_TRADER_INTERVAL = int(os.environ.get("CLAUDE_TRADER_INTERVAL", str(4 * 3600)))
+# Minimum liquidity for Claude to consider a market ($)
+CLAUDE_TRADER_MIN_LIQUIDITY = float(os.environ.get("CLAUDE_TRADER_MIN_LIQUIDITY", "5000"))
+# Minimum edge (probability difference) for Claude to bet
+CLAUDE_MIN_EDGE = float(os.environ.get("CLAUDE_MIN_EDGE", "0.08"))
+
 # Minimum number of target wallets that must buy the same token within
 # CONVICTION_WINDOW_SECONDS to trigger a "high conviction" multiplier.
 CONVICTION_THRESHOLD = 2          # e.g. 2+ wallets buying same token = strong signal

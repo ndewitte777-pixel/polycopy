@@ -40,7 +40,10 @@ from config import (
     MAX_TRADE_USDC,
     MAX_DAILY_LOSS_USDC,
     MAX_OPEN_POSITIONS,
-    USE_KELLY,
+    USE_CLAUDE_FILTER,
+    CLAUDE_MIN_CONFIDENCE,
+    USE_CLAUDE_TRADER,
+    CLAUDE_TRADER_INTERVAL,
     KELLY_FRACTION,
     ALLOWED_CATEGORIES,
     MAX_CATEGORY_EXPOSURE_PCT,
@@ -57,6 +60,8 @@ from executor import Executor
 import position_monitor as pm
 import state as st
 import notifier
+import claude_filter as cf
+import claude_trader as ct
 
 logging.basicConfig(
     level=logging.INFO,
@@ -338,6 +343,36 @@ def process_activity_item(data_api: DataAPI, executor: Executor, state: dict,
 
     # --- Execute BUY ---
     if side == "BUY":
+        # Ask Claude whether to proceed
+        ai_decision = cf.evaluate_trade(
+            market_info=market_info,
+            price=price,
+            your_size=your_size,
+            conviction=conviction,
+            trader_bankroll=trader_bankroll,
+            usdc_size=usdc_size,
+        )
+        should_trade, your_size = cf.apply_decision(ai_decision, your_size)
+
+        if not should_trade:
+            log.info(
+                "Claude SKIPPED trade: %s | confidence=%d | %s",
+                market_info.get("question", "?"),
+                ai_decision.get("confidence", 0),
+                ai_decision.get("reason", ""),
+            )
+            notifier.send(
+                title="🤖 Claude skipped a trade",
+                message=(
+                    f"{market_info.get('question', '?')}\n"
+                    f"Outcome: {market_info.get('outcome', '?')} @ {price:.3f}\n"
+                    f"Reason: {ai_decision.get('reason', '')}\n"
+                    f"Confidence: {ai_decision.get('confidence', 0)}%"
+                ),
+            )
+            st.mark_seen(state, tx_hash)
+            return
+
         resp = executor.place_order(token_id=token_id, side=side,
                                     price=price, size_usdc=your_size)
         st.record_trade(state, {
@@ -442,8 +477,10 @@ def run():
         return
 
     log.info(
-        "Starting Polymarket copy bot. DRY_RUN=%s, targets=%s",
-        DRY_RUN, TARGET_WALLETS,
+        "Starting Polymarket copy bot. DRY_RUN=%s | Claude filter=%s | "
+        "Claude trader=%s (every %dh) | targets=%s",
+        DRY_RUN, USE_CLAUDE_FILTER, USE_CLAUDE_TRADER,
+        CLAUDE_TRADER_INTERVAL // 3600, TARGET_WALLETS,
     )
 
     data_api = DataAPI()
@@ -457,7 +494,8 @@ def run():
     last_signal_time = time.time()
     last_monitor_time = 0.0
     last_balance_check = time.time()
-    BALANCE_REFRESH_SECONDS = 3600  # re-fetch balance every hour
+    last_claude_trader_time = 0.0  # start at 0 so it runs on first loop
+    BALANCE_REFRESH_SECONDS = 3600
     consecutive_errors = 0
 
     while True:
@@ -507,6 +545,20 @@ def run():
                     and silence >= HEARTBEAT_SILENCE_SECONDS):
                 notifier.notify_no_activity(silence / 3600, TARGET_WALLETS)
                 last_signal_time = now  # reset so we don't spam
+
+            # ── Claude autonomous trader ──────────────────────────────
+            if (USE_CLAUDE_TRADER
+                    and now - last_claude_trader_time >= CLAUDE_TRADER_INTERVAL):
+                log.info("Running Claude autonomous trader scan...")
+                trades = ct.run_claude_trader(
+                    executor=executor,
+                    state=state,
+                    session=session,
+                    your_bankroll=your_bankroll,
+                    notifier=notifier,
+                )
+                log.info("Claude autonomous trader: %d trades placed", trades)
+                last_claude_trader_time = now
 
             # ── Weekly report ─────────────────────────────────────────────
             if should_send_weekly_report(state):
