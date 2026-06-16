@@ -52,11 +52,33 @@ CLAUDE_TRADER_MIN_LIQUIDITY = float(os.environ.get("CLAUDE_TRADER_MIN_LIQUIDITY"
 CLAUDE_MIN_EDGE = float(os.environ.get("CLAUDE_MIN_EDGE", "0.08"))
 
 # Minimum number of target wallets that must buy the same token within
-# ---- Live game scalping ----
+# ---- Daily profit targets ----
+# Weekday and weekend daily profit goals in USDC
+WEEKDAY_PROFIT_TARGET = float(os.environ.get("WEEKDAY_PROFIT_TARGET", "5.0"))
+WEEKEND_PROFIT_TARGET = float(os.environ.get("WEEKEND_PROFIT_TARGET", "10.0"))
+# Once daily target is hit, switch to conservative mode (smaller sizes, higher confidence bar)
+CONSERVATIVE_MODE_AFTER_TARGET = True
+# How much of daily profit to protect — stop trading if we give back this much after hitting target
+PROFIT_PROTECTION_PCT = float(os.environ.get("PROFIT_PROTECTION_PCT", "50.0"))
+
+
 USE_LIVE_SCALPER = os.environ.get("USE_LIVE_SCALPER", "true").lower() == "true"
 LIVE_POLL_INTERVAL = int(os.environ.get("LIVE_POLL_INTERVAL", "20"))  # seconds between live checks
 SCALP_PROFIT_PCT = float(os.environ.get("SCALP_PROFIT_PCT", "15.0"))  # % gain to trigger scalp exit
 SCALP_MIN_CENTS = float(os.environ.get("SCALP_MIN_CENTS", "0.05"))    # $0.05 absolute price gain
+
+# ---- Market time horizon preferences ----
+# Bot trades ALL Polymarket categories (sports, politics, crypto, futures, etc.)
+# but prioritizes same-day and next-day markets with bigger sizes.
+SAME_DAY_SIZE_MULTIPLIER  = float(os.environ.get("SAME_DAY_SIZE_MULTIPLIER",  "1.5"))
+NEXT_DAY_SIZE_MULTIPLIER  = float(os.environ.get("NEXT_DAY_SIZE_MULTIPLIER",  "1.2"))
+LONG_TERM_SIZE_MULTIPLIER = float(os.environ.get("LONG_TERM_SIZE_MULTIPLIER", "0.7"))
+# Fraction of Claude trader's scan budget to spend on short-term markets first (0-100)
+SHORT_TERM_BUDGET_PCT = float(os.environ.get("SHORT_TERM_BUDGET_PCT", "70"))
+# Claude trader: min hours left on a market before considering it
+CLAUDE_TRADER_MIN_HOURS_LEFT = float(os.environ.get("CLAUDE_TRADER_MIN_HOURS_LEFT", "1.0"))
+# Claude trader: max days out to scan (0 = no limit)
+CLAUDE_TRADER_MAX_DAYS_OUT = int(os.environ.get("CLAUDE_TRADER_MAX_DAYS_OUT", "30"))
 
 # CONVICTION_WINDOW_SECONDS to trigger a "high conviction" multiplier.
 CONVICTION_THRESHOLD = 2          # e.g. 2+ wallets buying same token = strong signal

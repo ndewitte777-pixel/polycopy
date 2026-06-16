@@ -1,20 +1,18 @@
 """
 Claude Autonomous Trading Engine
 =================================
-Independently scans Polymarket for trade opportunities and places bets
-based on Claude's own analysis and predictions.
+Independently scans ALL Polymarket categories for trade opportunities:
+sports, politics, crypto, economics, pop culture, futures, and more.
 
-Runs on a separate interval from the copy engine (default every 4 hours).
+Prioritizes same-day and next-day markets (70% of budget) since they
+resolve fastest and allow the scalper to profit on price movements.
+Longer-term markets get smaller allocations but are still traded.
 
 Strategy:
-1. Fetch active markets from Gamma API (high liquidity, closing soon or active)
-2. For each market, ask Claude: "What's your estimated true probability?"
-3. If Claude's estimate differs significantly from the market price (edge),
-   size a bet using Kelly criterion on the edge
-4. Place the order and track it separately from copied trades
-
-Claude is given the market question, current price, end date, category,
-and any relevant context it can reason about from its training.
+1. Fetch active markets sorted by time horizon (soonest first)
+2. Ask Claude: "What's your estimated true probability?"
+3. If edge > 8%, size a bet using Kelly criterion
+4. Track separately from copied trades
 """
 
 import json
@@ -32,13 +30,22 @@ from config import (
     YOUR_BANKROLL_USDC,
     KELLY_FRACTION,
     MAX_TRADE_USDC,
+    MAX_DAILY_LOSS_USDC,
+    SAME_DAY_SIZE_MULTIPLIER,
+    NEXT_DAY_SIZE_MULTIPLIER,
+    LONG_TERM_SIZE_MULTIPLIER,
+    SHORT_TERM_BUDGET_PCT,
+    CLAUDE_TRADER_MIN_HOURS_LEFT,
+    CLAUDE_TRADER_MAX_DAYS_OUT,
 )
 
 log = logging.getLogger("polycopy.claude_trader")
 
 ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 
-SYSTEM_PROMPT = """You are an expert prediction market trader with deep knowledge of world events, politics, sports, economics, and current affairs.
+SYSTEM_PROMPT = """You are an expert prediction market trader with deep knowledge of world events, politics, sports, economics, crypto, pop culture, and current affairs.
+
+You trade ALL categories on Polymarket — sports, politics, crypto prices, economic indicators, entertainment, science, weather, futures, and anything else listed. No category is off limits as long as you have genuine knowledge-based edge.
 
 You will be shown active Polymarket prediction markets. For each market, you must:
 1. Estimate the TRUE probability of the YES outcome based on your knowledge
@@ -46,12 +53,20 @@ You will be shown active Polymarket prediction markets. For each market, you mus
 3. Identify if there is a meaningful edge (your estimate vs market price differs by >8%)
 4. Decide whether to BET YES, BET NO, or PASS
 
+IMPORTANT — Time horizon priority:
+- Same-day markets (closes today): HIGHEST priority — these resolve fast, prices move during events
+- Next-day markets (closes tomorrow): HIGH priority — still great for capturing event price moves
+- Longer term (3-30 days): Lower priority — only bet if you have very strong knowledge edge
+- Very short (< 1 hour left): SKIP unless you're extremely confident
+
 Key principles:
 - Only bet when you have genuine knowledge-based edge, not just hunches
-- Markets are often efficient — be humble, only bet when confident
-- Consider: Is this something you have reliable knowledge about? Is your information likely more accurate than the market?
-- Short time to close + large edge = strong opportunity
-- Never bet on markets you genuinely don't know enough about
+- For live sports: consider current score, time remaining, momentum
+- For crypto: consider recent price action and market sentiment you know about
+- For politics: consider polls, historical patterns, recent developments
+- For economics: consider recent data releases and Fed signals
+- Short time + large edge = strongest opportunity
+- Never bet on things you genuinely know nothing about
 
 You must respond ONLY with a valid JSON object:
 {
@@ -59,12 +74,12 @@ You must respond ONLY with a valid JSON object:
   "my_probability": <float 0.0-1.0, your estimated true probability of YES>,
   "edge": <float, your_probability minus market_price, positive means YES has edge>,
   "confidence": <integer 0-100>,
-  "reason": "<2-3 sentence explanation of your reasoning>",
-  "suggested_size_pct": <integer 0-100, % of max trade size to use>
+  "reason": "<2-3 sentence explanation>",
+  "suggested_size_pct": <integer 0-100, % of max trade size to use>,
+  "time_horizon": "same_day" | "next_day" | "long_term"
 }
 
-If you PASS, set suggested_size_pct to 0.
-Be honest about uncertainty. PASS is often the right answer."""
+If you PASS, set suggested_size_pct to 0. Be honest about uncertainty."""
 
 
 MARKET_PROMPT_TEMPLATE = """Evaluate this Polymarket prediction market:
@@ -83,11 +98,13 @@ What is your estimated true probability for YES? Is there a betting edge here?
 Respond with JSON only."""
 
 
-def fetch_active_markets(session: requests.Session, limit: int = 50,
-                         min_liquidity: float = 5000) -> list:
+def fetch_active_markets(session: requests.Session, limit: int = 80,
+                         min_liquidity: float = 2000) -> tuple[list, list]:
     """
-    Fetch active markets from Gamma API sorted by liquidity.
-    Filters to markets closing within the next 30 days with decent liquidity.
+    Fetch active markets sorted by time horizon.
+    Returns (short_term_markets, long_term_markets) where:
+    - short_term: closes within 2 days (same day or next day)
+    - long_term: closes in 2-30 days
     """
     try:
         url = f"{GAMMA_API_URL}/markets"
@@ -95,40 +112,73 @@ def fetch_active_markets(session: requests.Session, limit: int = 50,
             "active": "true",
             "closed": "false",
             "limit": limit,
-            "order": "liquidity",
-            "ascending": "false",
+            "order": "endDate",
+            "ascending": "true",  # soonest first
         }
         r = session.get(url, params=params, timeout=15)
         r.raise_for_status()
         markets = r.json()
 
-        # Filter by liquidity and reasonable end date
         now = datetime.now(timezone.utc)
-        filtered = []
+        short_term = []
+        long_term = []
+
         for m in markets:
             liq = float(m.get("liquidity", 0) or 0)
             if liq < min_liquidity:
                 continue
-            end_date = m.get("endDate") or m.get("end_date", "")
-            if end_date:
-                try:
-                    end = datetime.fromisoformat(
-                        end_date.replace("Z", "+00:00")
-                    )
-                    days_left = (end - now).total_seconds() / 86400
-                    if days_left < 0 or days_left > 30:
-                        continue
-                    m["_days_left"] = days_left
-                except Exception:
-                    pass
-            filtered.append(m)
 
-        log.info("Fetched %d active markets for Claude analysis", len(filtered))
-        return filtered
+            end_date = m.get("endDate") or m.get("end_date", "")
+            if not end_date:
+                continue
+
+            try:
+                end = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
+                hours_left = (end - now).total_seconds() / 3600
+                days_left = hours_left / 24
+
+                if hours_left < CLAUDE_TRADER_MIN_HOURS_LEFT:
+                    continue  # too close to close
+                if CLAUDE_TRADER_MAX_DAYS_OUT > 0 and days_left > CLAUDE_TRADER_MAX_DAYS_OUT:
+                    continue  # too far out
+
+                m["_hours_left"] = hours_left
+                m["_days_left"] = days_left
+
+                if days_left <= 2:
+                    short_term.append(m)
+                else:
+                    long_term.append(m)
+            except Exception:
+                continue
+
+        log.info(
+            "Markets found: %d same/next-day, %d longer-term",
+            len(short_term), len(long_term),
+        )
+        return short_term, long_term
 
     except Exception as e:
         log.error("Failed to fetch active markets: %s", e)
-        return []
+        return [], []
+
+
+def time_horizon_multiplier(days_left: float) -> float:
+    """Return size multiplier based on how soon the market closes."""
+    if days_left <= 1:
+        return SAME_DAY_SIZE_MULTIPLIER   # same day — biggest size
+    elif days_left <= 2:
+        return NEXT_DAY_SIZE_MULTIPLIER   # next day — slightly smaller
+    else:
+        return LONG_TERM_SIZE_MULTIPLIER  # longer term — smaller allocation
+
+
+def time_horizon_label(days_left: float) -> str:
+    if days_left <= 1:
+        return "same_day"
+    elif days_left <= 2:
+        return "next_day"
+    return "long_term"
 
 
 def parse_price(market: dict) -> float:
@@ -294,161 +344,175 @@ def kelly_size_from_edge(my_prob: float, price: float,
 def run_claude_trader(executor, state: dict, session: requests.Session,
                       your_bankroll: float, notifier) -> int:
     """
-    Main entry point called from bot.py on each Claude trading interval.
-    Scans markets, asks Claude for opinions, places bets on high-edge opportunities.
-    Returns number of trades placed.
+    Scan all Polymarket categories. Process short-term markets first
+    with 70% of the trade budget, then longer-term with the remainder.
     """
     from sports_data import fetch_all_live_games, match_game_to_market, format_game_context
 
-    log.info("Claude trader: scanning markets...")
-    markets = fetch_active_markets(session)
-    if not markets:
+    log.info("Claude trader: scanning all Polymarket categories...")
+    short_term, long_term = fetch_active_markets(session)
+
+    if not short_term and not long_term:
         return 0
 
-    # Fetch all live games for context
+    # Fetch live game context once for all markets
     live_games = fetch_all_live_games(session)
-    log.info("Found %d live games for context", len(live_games))
+    if live_games:
+        log.info("Live game context available for %d games", len(live_games))
+
+    # Budget: 70% of max daily trades go to short-term, 30% to long-term
+    max_trades_total = 6  # max Claude-initiated trades per scan
+    short_budget = max(1, int(max_trades_total * SHORT_TERM_BUDGET_PCT / 100))
+    long_budget = max_trades_total - short_budget
 
     trades_placed = 0
-    skipped = 0
-    passed = 0
 
-    for market in markets:
-        time.sleep(1.5)
+    def process_market_list(markets: list, budget: int, label: str) -> int:
+        nonlocal trades_placed
+        placed = 0
+        for market in markets:
+            if placed >= budget:
+                break
+            if state.get("open_positions", 0) >= 10:
+                log.warning("Max open positions reached")
+                break
+            if state.get("daily_loss", 0) >= MAX_DAILY_LOSS_USDC:
+                log.warning("Daily loss limit hit")
+                break
 
-        question = market.get("question") or market.get("title", "")
-        price = parse_price(market)
-        if price <= 0 or price >= 1:
-            continue
+            time.sleep(1.5)  # rate limit Claude API
 
-        # Match live game context to this market
-        live_context = ""
-        best_match_score = 0.0
-        for game in live_games:
-            score = match_game_to_market(game, question)
-            if score > best_match_score:
-                best_match_score = score
+            question = market.get("question") or market.get("title", "")
+            price = parse_price(market)
+            if price <= 0 or price >= 1:
+                continue
+
+            days_left = market.get("_days_left", 5)
+            hours_left = market.get("_hours_left", 99)
+
+            # Live game context
+            live_context = ""
+            for game in live_games:
+                score = match_game_to_market(game, question)
                 if score >= 0.4:
                     live_context = format_game_context(game)
+                    break
 
-        decision = ask_claude(market, live_context)
-        if not decision:
-            continue
+            decision = ask_claude(market, live_context)
+            if not decision:
+                continue
 
-        d = decision["decision"].upper()
-        confidence = decision.get("confidence", 0)
-        my_prob = decision.get("my_probability", price)
-        edge = decision.get("edge", 0)
-        reason = decision.get("reason", "")
-        size_pct = decision.get("suggested_size_pct", 0)
+            d = decision["decision"].upper()
+            confidence = decision.get("confidence", 0)
+            my_prob = decision.get("my_probability", price)
+            edge = decision.get("edge", 0)
+            reason = decision.get("reason", "")
+            size_pct = decision.get("suggested_size_pct", 0)
 
-        # Skip PASS or low confidence
-        if d == "PASS" or confidence < 60 or abs(edge) < 0.08:
-            passed += 1
+            if d == "PASS" or confidence < 60 or abs(edge) < 0.08:
+                log.info(
+                    "Claude PASS [%s]: '%s' | price=%.3f my_prob=%.3f edge=%.3f conf=%d",
+                    label, question[:60], price, my_prob, edge, confidence,
+                )
+                continue
+
+            if d == "BET_YES":
+                side = "YES"
+                token_id = parse_token_id(market, "YES")
+                bet_price = price
+            elif d == "BET_NO":
+                side = "NO"
+                token_id = parse_token_id(market, "NO")
+                bet_price = 1 - price
+            else:
+                continue
+
+            if not token_id:
+                continue
+
+            # Size = Kelly * time horizon multiplier * suggested_size_pct
+            base_size = kelly_size_from_edge(my_prob, price, your_bankroll, side)
+            horizon_mult = time_horizon_multiplier(days_left)
+            size_usdc = base_size * horizon_mult * (size_pct / 100 if size_pct else 1.0)
+            size_usdc = max(1.0, min(size_usdc, MAX_TRADE_USDC))
+
+            hours_str = f"{hours_left:.1f}h" if hours_left < 48 else f"{days_left:.1f}d"
             log.info(
-                "Claude PASS: '%s' | price=%.3f my_prob=%.3f edge=%.3f conf=%d",
-                question[:60], price, my_prob, edge, confidence,
+                "Claude TRADE [%s | %s] | %s | BET_%s @ %.3f | "
+                "my_prob=%.3f edge=%.3f conf=%d size=$%.2f | %s",
+                label, hours_str, question[:55], side, bet_price,
+                my_prob, edge, confidence, size_usdc, reason,
             )
-            continue
 
-        # Determine side and token
-        if d == "BET_YES":
-            side = "YES"
-            token_id = parse_token_id(market, "YES")
-            bet_price = price
-        elif d == "BET_NO":
-            side = "NO"
-            token_id = parse_token_id(market, "NO")
-            bet_price = 1 - price  # NO token price
-        else:
-            passed += 1
-            continue
+            resp = executor.place_order(
+                token_id=token_id, side="BUY",
+                price=bet_price, size_usdc=size_usdc,
+            )
 
-        if not token_id:
-            log.warning("Could not get token_id for market: %s", question[:50])
-            continue
+            end_date = market.get("endDate") or market.get("end_date", "")
+            if end_date and "T" in end_date:
+                end_date = end_date.split("T")[0]
+            slug = market.get("slug") or ""
+            market_url = f"https://polymarket.com/event/{slug}" if slug else ""
 
-        # Size using Kelly on the edge
-        size_usdc = kelly_size_from_edge(my_prob, price, your_bankroll, side)
-        size_usdc = size_usdc * (size_pct / 100) if size_pct else size_usdc
-        size_usdc = max(1.0, min(size_usdc, MAX_TRADE_USDC))
+            category = ""
+            tags = market.get("tags") or []
+            if isinstance(tags, list) and tags and isinstance(tags[0], dict):
+                category = tags[0].get("label") or tags[0].get("slug", "")
 
-        # Check open positions limit
-        if state.get("open_positions", 0) >= 10:
-            log.warning("Max open positions reached, Claude trader pausing")
-            break
+            market_info = {
+                "question": question,
+                "outcome": side,
+                "end_date": end_date,
+                "liquidity": float(market.get("liquidity", 0) or 0),
+                "category": category,
+                "url": market_url,
+            }
 
-        # Check daily loss
-        if state.get("daily_loss", 0) >= state.get("max_daily_loss", 100):
-            log.warning("Daily loss limit hit, Claude trader pausing")
-            break
+            open_lots = state.setdefault("open_lots", {})
+            lots = open_lots.get(token_id, [])
+            lots.append({
+                "entry_price": bet_price,
+                "size_usdc": size_usdc,
+                "peak_price": bet_price,
+                "wallet": "claude_ai",
+                "condition_id": market.get("conditionId", ""),
+                "market_info": market_info,
+                "opened_at": time.time(),
+                "took_profit": False,
+                "source": "claude_autonomous",
+                "time_horizon": label,
+            })
+            open_lots[token_id] = lots
+            state["open_positions"] = state.get("open_positions", 0) + 1
 
-        log.info(
-            "Claude TRADE | %s | BET_%s @ %.3f | my_prob=%.3f edge=%.3f "
-            "conf=%d size=$%.2f | %s",
-            question[:60], side, bet_price, my_prob, edge,
-            confidence, size_usdc, reason,
-        )
+            horizon_emoji = "⚡" if label == "same_day" else "📅" if label == "next_day" else "🗓️"
+            import notifier as _notifier
+            _notifier.send(
+                title=f"🤖{horizon_emoji} Claude BET {side} [{label}]",
+                message=(
+                    f"{question}\n\n"
+                    f"Betting {side} @ {bet_price:.3f} "
+                    f"(implied {bet_price*100:.1f}%)\n"
+                    f"My estimate: {my_prob*100:.1f}% | Edge: {edge:+.1%}\n"
+                    f"Size: ${size_usdc:.2f} | Confidence: {confidence}%\n"
+                    f"Closes in: {hours_str}\n"
+                    f"{reason}\n{market_url}"
+                ),
+            )
 
-        resp = executor.place_order(
-            token_id=token_id,
-            side="BUY",
-            price=bet_price,
-            size_usdc=size_usdc,
-        )
+            placed += 1
+            trades_placed += 1
 
-        # Track in state
-        end_date = market.get("endDate") or market.get("end_date", "")
-        if end_date and "T" in end_date:
-            end_date = end_date.split("T")[0]
+        return placed
 
-        slug = market.get("slug") or ""
-        market_url = f"https://polymarket.com/event/{slug}" if slug else ""
+    # Process short-term first (same day and next day)
+    log.info("Processing %d short-term markets (budget: %d trades)", len(short_term), short_budget)
+    process_market_list(short_term, short_budget, "same_day/next_day")
 
-        market_info = {
-            "question": question,
-            "outcome": side,
-            "end_date": end_date,
-            "liquidity": float(market.get("liquidity", 0) or 0),
-            "category": "",
-            "url": market_url,
-        }
+    # Then longer-term with remaining budget
+    log.info("Processing %d long-term markets (budget: %d trades)", len(long_term), long_budget)
+    process_market_list(long_term, long_budget, "long_term")
 
-        open_lots = state.setdefault("open_lots", {})
-        lots = open_lots.get(token_id, [])
-        lots.append({
-            "entry_price": bet_price,
-            "size_usdc": size_usdc,
-            "peak_price": bet_price,
-            "wallet": "claude_ai",
-            "condition_id": market.get("conditionId", ""),
-            "market_info": market_info,
-            "opened_at": time.time(),
-            "took_profit": False,
-            "source": "claude_autonomous",
-        })
-        open_lots[token_id] = lots
-        state["open_positions"] = state.get("open_positions", 0) + 1
-
-        import notifier as _notifier
-        _notifier.send(
-            title=f"🤖 Claude AI Trade | BET {side}",
-            message=(
-                f"{question}\n\n"
-                f"Betting {side} @ {bet_price:.3f} "
-                f"(implied {bet_price*100:.1f}%)\n"
-                f"My estimate: {my_prob*100:.1f}% | Edge: {edge:+.1%}\n"
-                f"Size: ${size_usdc:.2f} | Confidence: {confidence}%\n"
-                f"{reason}\n"
-                f"{market_url}"
-            ),
-            priority=0,
-        )
-
-        trades_placed += 1
-
-    log.info(
-        "Claude trader done: %d trades placed, %d passed, %d skipped/error",
-        trades_placed, passed, skipped,
-    )
+    log.info("Claude trader done: %d trades placed total", trades_placed)
     return trades_placed
