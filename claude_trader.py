@@ -106,6 +106,7 @@ def fetch_active_markets(session: requests.Session, limit: int = 80,
     - short_term: closes within 2 days (same day or next day)
     - long_term: closes in 2-30 days
     """
+    markets = None
     for attempt in range(2):
         try:
             url = f"{GAMMA_API_URL}/markets"
@@ -129,7 +130,10 @@ def fetch_active_markets(session: requests.Session, limit: int = 80,
             log.error("Failed to fetch active markets after retry: %s", e)
             return [], []
 
-        now = datetime.now(timezone.utc)
+    if markets is None:
+        return [], []
+
+    now = datetime.now(timezone.utc)
         short_term = []
         long_term = []
         total_seen = 0
