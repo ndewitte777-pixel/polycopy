@@ -134,69 +134,69 @@ def fetch_active_markets(session: requests.Session, limit: int = 80,
         return [], []
 
     now = datetime.now(timezone.utc)
-        short_term = []
-        long_term = []
-        total_seen = 0
-        skipped_liq = 0
-        skipped_date = 0
+    short_term = []
+    long_term = []
+    total_seen = 0
+    skipped_liq = 0
+    skipped_date = 0
 
-        # Handle both list response and nested {"markets": [...]} response
-        if isinstance(markets, dict):
-            markets = markets.get("markets", markets.get("data", []))
+    # Handle both list response and nested {"markets": [...]} response
+    if isinstance(markets, dict):
+        markets = markets.get("markets", markets.get("data", []))
 
-        for m in markets:
-            total_seen += 1
-            liq = float(m.get("liquidity", 0) or 0)
-            if liq < min_liquidity:
-                skipped_liq += 1
-                continue
+    for m in markets:
+        total_seen += 1
+        liq = float(m.get("liquidity", 0) or 0)
+        if liq < min_liquidity:
+            skipped_liq += 1
+            continue
 
-            # Try multiple end date field names and formats
-            end_date = (
-                m.get("endDate") or m.get("end_date") or
-                m.get("endDateIso") or m.get("gameStartTime") or ""
-            )
-            if not end_date:
-                skipped_date += 1
-                continue
-
-            try:
-                # Handle Unix timestamp (integer or string number)
-                if isinstance(end_date, (int, float)) or (
-                    isinstance(end_date, str) and end_date.isdigit()
-                ):
-                    end = datetime.fromtimestamp(int(end_date), tz=timezone.utc)
-                else:
-                    # ISO string
-                    end = datetime.fromisoformat(
-                        str(end_date).replace("Z", "+00:00").replace(" ", "T")
-                    )
-
-                hours_left = (end - now).total_seconds() / 3600
-                days_left = hours_left / 24
-
-                if hours_left < CLAUDE_TRADER_MIN_HOURS_LEFT:
-                    continue
-                if CLAUDE_TRADER_MAX_DAYS_OUT > 0 and days_left > CLAUDE_TRADER_MAX_DAYS_OUT:
-                    continue
-
-                m["_hours_left"] = hours_left
-                m["_days_left"] = days_left
-
-                if days_left <= 2:
-                    short_term.append(m)
-                else:
-                    long_term.append(m)
-            except Exception as e:
-                log.debug("Date parse failed for '%s': %s", end_date, e)
-                continue
-
-        log.info(
-            "Markets: %d total, %d low-liq, %d no-date → %d same/next-day, %d longer-term",
-            total_seen, skipped_liq, skipped_date,
-            len(short_term), len(long_term),
+        # Try multiple end date field names and formats
+        end_date = (
+            m.get("endDate") or m.get("end_date") or
+            m.get("endDateIso") or m.get("gameStartTime") or ""
         )
-        return short_term, long_term
+        if not end_date:
+            skipped_date += 1
+            continue
+
+        try:
+            # Handle Unix timestamp (integer or string number)
+            if isinstance(end_date, (int, float)) or (
+                isinstance(end_date, str) and end_date.isdigit()
+            ):
+                end = datetime.fromtimestamp(int(end_date), tz=timezone.utc)
+            else:
+                # ISO string
+                end = datetime.fromisoformat(
+                    str(end_date).replace("Z", "+00:00").replace(" ", "T")
+                )
+
+            hours_left = (end - now).total_seconds() / 3600
+            days_left = hours_left / 24
+
+            if hours_left < CLAUDE_TRADER_MIN_HOURS_LEFT:
+                continue
+            if CLAUDE_TRADER_MAX_DAYS_OUT > 0 and days_left > CLAUDE_TRADER_MAX_DAYS_OUT:
+                continue
+
+            m["_hours_left"] = hours_left
+            m["_days_left"] = days_left
+
+            if days_left <= 2:
+                short_term.append(m)
+            else:
+                long_term.append(m)
+        except Exception as e:
+            log.debug("Date parse failed for '%s': %s", end_date, e)
+            continue
+
+    log.info(
+        "Markets: %d total, %d low-liq, %d no-date → %d same/next-day, %d longer-term",
+        total_seen, skipped_liq, skipped_date,
+        len(short_term), len(long_term),
+    )
+    return short_term, long_term
 
 
 def time_horizon_multiplier(days_left: float) -> float:
