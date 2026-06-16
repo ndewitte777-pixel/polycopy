@@ -115,7 +115,7 @@ def fetch_active_markets(session: requests.Session, limit: int = 100,
                 "closed": "false",
                 "limit": limit,
                 "order": "endDate",
-                "ascending": "true",
+                "ascending": "false",  # descending so we get future markets, not past
             }
             r = session.get(url, params=params, timeout=30)
             r.raise_for_status()
@@ -194,6 +194,10 @@ def fetch_active_markets(session: requests.Session, limit: int = 100,
         except Exception as e:
             log.debug("Date parse failed for '%s': %s", end_date, e)
             continue
+
+    # Sort both lists soonest-first
+    short_term.sort(key=lambda m: m.get("_hours_left", 999))
+    long_term.sort(key=lambda m: m.get("_hours_left", 999))
 
     log.info(
         "Markets: %d total, %d low-liq, %d no-date → %d same/next-day, %d longer-term",
