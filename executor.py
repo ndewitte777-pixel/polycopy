@@ -47,16 +47,23 @@ class Executor:
             return YOUR_BANKROLL_USDC
 
         try:
-            balance_data = self.client.get_balance()
-            if isinstance(balance_data, dict):
-                raw = float(balance_data.get("balance", 0) or 0)
-            else:
-                raw = float(balance_data or 0)
+            # py-clob-client stores the wallet address on the client
+            address = getattr(self.client, "address", None)
+            if not address:
+                return YOUR_BANKROLL_USDC
 
-            # Convert from 6-decimal USDC units if needed
-            if raw > 1_000_000:
-                raw = raw / 1_000_000
-
+            # Fetch via Polygon RPC - balanceOf(address) on USDC contract
+            USDC_CONTRACT = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+            data = "0x70a08231" + address[2:].lower().zfill(64)
+            payload = {
+                "jsonrpc": "2.0",
+                "method": "eth_call",
+                "params": [{"to": USDC_CONTRACT, "data": data}, "latest"],
+                "id": 1,
+            }
+            resp = requests.post("https://polygon-rpc.com", json=payload, timeout=8)
+            result = resp.json().get("result", "0x0")
+            raw = int(result, 16) / 1_000_000  # USDC has 6 decimals
             log.info("Live wallet balance: $%.2f USDC", raw)
             return raw if raw > 0 else YOUR_BANKROLL_USDC
 

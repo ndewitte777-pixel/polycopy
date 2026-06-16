@@ -176,12 +176,12 @@ def fetch_active_markets(session: requests.Session, limit: int = 100,
             days_left = hours_left / 24
 
             if hours_left < CLAUDE_TRADER_MIN_HOURS_LEFT:
-                log.debug("Skipping (too close/past): %s | %.1fh left",
-                          m.get("question", "?")[:50], hours_left)
+                log.info("Skipping (too close/past): '%s' | %.1fh left",
+                         m.get("question", "?")[:50], hours_left)
                 continue
             if CLAUDE_TRADER_MAX_DAYS_OUT > 0 and days_left > CLAUDE_TRADER_MAX_DAYS_OUT:
-                log.debug("Skipping (too far out): %s | %.1fd left",
-                          m.get("question", "?")[:50], days_left)
+                log.info("Skipping (too far out): '%s' | %.1fd left",
+                         m.get("question", "?")[:50], days_left)
                 continue
 
             m["_hours_left"] = hours_left
