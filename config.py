@@ -78,7 +78,7 @@ SHORT_TERM_BUDGET_PCT = float(os.environ.get("SHORT_TERM_BUDGET_PCT", "70"))
 # Claude trader: min hours left on a market before considering it
 CLAUDE_TRADER_MIN_HOURS_LEFT = float(os.environ.get("CLAUDE_TRADER_MIN_HOURS_LEFT", "1.0"))
 # Claude trader: max days out to scan (0 = no limit)
-CLAUDE_TRADER_MAX_DAYS_OUT = int(os.environ.get("CLAUDE_TRADER_MAX_DAYS_OUT", "30"))
+CLAUDE_TRADER_MAX_DAYS_OUT = int(os.environ.get("CLAUDE_TRADER_MAX_DAYS_OUT", "90"))
 
 # CONVICTION_WINDOW_SECONDS to trigger a "high conviction" multiplier.
 CONVICTION_THRESHOLD = 2          # e.g. 2+ wallets buying same token = strong signal

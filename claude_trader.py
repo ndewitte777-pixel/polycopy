@@ -98,8 +98,8 @@ What is your estimated true probability for YES? Is there a betting edge here?
 Respond with JSON only."""
 
 
-def fetch_active_markets(session: requests.Session, limit: int = 80,
-                         min_liquidity: float = 2000) -> tuple[list, list]:
+def fetch_active_markets(session: requests.Session, limit: int = 100,
+                         min_liquidity: float = 500) -> tuple[list, list]:
     """
     Fetch active markets sorted by time horizon.
     Returns (short_term_markets, long_term_markets) where:
@@ -176,8 +176,12 @@ def fetch_active_markets(session: requests.Session, limit: int = 80,
             days_left = hours_left / 24
 
             if hours_left < CLAUDE_TRADER_MIN_HOURS_LEFT:
+                log.debug("Skipping (too close/past): %s | %.1fh left",
+                          m.get("question", "?")[:50], hours_left)
                 continue
             if CLAUDE_TRADER_MAX_DAYS_OUT > 0 and days_left > CLAUDE_TRADER_MAX_DAYS_OUT:
+                log.debug("Skipping (too far out): %s | %.1fd left",
+                          m.get("question", "?")[:50], days_left)
                 continue
 
             m["_hours_left"] = hours_left
@@ -196,6 +200,14 @@ def fetch_active_markets(session: requests.Session, limit: int = 80,
         total_seen, skipped_liq, skipped_date,
         len(short_term), len(long_term),
     )
+
+    # Log a sample of what was found to help debug
+    for m in (short_term + long_term)[:3]:
+        log.info("Sample market: '%s' | %.1fh left | liq=$%.0f",
+                 m.get("question", "?")[:60],
+                 m.get("_hours_left", 0),
+                 float(m.get("liquidity", 0) or 0))
+
     return short_term, long_term
 
 
