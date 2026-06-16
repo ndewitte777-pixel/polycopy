@@ -48,6 +48,8 @@ from config import (
     CLAUDE_TRADER_INTERVAL,
     USE_LIVE_SCALPER,
     LIVE_POLL_INTERVAL,
+    WEEKDAY_PROFIT_TARGET,
+    WEEKEND_PROFIT_TARGET,
     KELLY_FRACTION,
     ALLOWED_CATEGORIES,
     MAX_CATEGORY_EXPOSURE_PCT,
@@ -68,6 +70,7 @@ import claude_filter as cf
 import claude_trader as ct
 import scalper as sc
 import sports_data as sd
+import profit_targets as pt
 
 logging.basicConfig(
     level=logging.INFO,
@@ -143,7 +146,11 @@ def compute_size(usdc_size: float, trader_bankroll: float,
 
 def category_ok(market_info: dict, open_lots: dict, your_bankroll: float) -> bool:
     """Return False if adding this position would exceed MAX_CATEGORY_EXPOSURE_PCT."""
-    category = market_info.get("category", "").upper()
+    category = market_info.get("category", "").upper().strip()
+
+    # Skip category filter entirely if category is unknown/blank
+    if not category:
+        return True
 
     if ALLOWED_CATEGORIES and category not in [c.upper() for c in ALLOWED_CATEGORIES]:
         log.info("Skipping: category %s not in ALLOWED_CATEGORIES", category)
@@ -152,17 +159,17 @@ def category_ok(market_info: dict, open_lots: dict, your_bankroll: float) -> boo
     if MAX_CATEGORY_EXPOSURE_PCT <= 0:
         return True
 
-    # Sum current exposure in this category
     total_exposure = 0.0
     for lots in open_lots.values():
         for lot in lots:
-            if lot.get("market_info", {}).get("category", "").upper() == category:
+            lot_cat = lot.get("market_info", {}).get("category", "").upper().strip()
+            if lot_cat and lot_cat == category:
                 total_exposure += lot.get("size_usdc", 0)
 
     max_allowed = your_bankroll * (MAX_CATEGORY_EXPOSURE_PCT / 100)
     if total_exposure >= max_allowed:
         log.info(
-            "Skipping: category %s already at %.2f / %.2f exposure limit",
+            "Skipping: category %s at %.2f / %.2f exposure limit",
             category, total_exposure, max_allowed,
         )
         return False
@@ -326,8 +333,12 @@ def process_activity_item(data_api: DataAPI, executor: Executor, state: dict,
         log.info("HIGH CONVICTION: %d wallets on %s", conviction, market_info["question"])
         notifier.notify_high_conviction(token_id, market_info, conviction_wallets, price)
 
-    # --- Position sizing ---
+    # --- Position sizing (adjusted for daily phase) ---
+    phase = pt.get_phase(state)
+    size_multiplier = pt.get_size_multiplier(phase)
     your_size = compute_size(usdc_size, trader_bankroll, your_bankroll, price, conviction)
+    your_size = your_size * size_multiplier
+    your_size = max(1.0, your_size) if your_size > 0 else 0
     trader_fraction = usdc_size / trader_bankroll if trader_bankroll else 0
 
     log.info(
@@ -349,7 +360,9 @@ def process_activity_item(data_api: DataAPI, executor: Executor, state: dict,
 
     # --- Execute BUY ---
     if side == "BUY":
-        # Ask Claude whether to proceed
+        # Ask Claude whether to proceed (confidence bar raised in PROTECTING phase)
+        phase = pt.get_phase(state)
+        min_conf = pt.get_min_confidence(phase)
         ai_decision = cf.evaluate_trade(
             market_info=market_info,
             price=price,
@@ -358,9 +371,12 @@ def process_activity_item(data_api: DataAPI, executor: Executor, state: dict,
             trader_bankroll=trader_bankroll,
             usdc_size=usdc_size,
         )
-        should_trade, your_size = cf.apply_decision(ai_decision, your_size)
+        # Override min confidence based on phase
+        original_min = cf.CLAUDE_MIN_CONFIDENCE
+        should_trade_flag, your_size = cf.apply_decision(ai_decision, your_size,
+                                                          min_confidence=min_conf)
 
-        if not should_trade:
+        if not should_trade_flag:
             log.info(
                 "Claude SKIPPED trade: %s | confidence=%d | %s",
                 market_info.get("question", "?"),
@@ -503,13 +519,34 @@ def run():
     last_balance_check = time.time()
     last_claude_trader_time = 0.0
     last_live_poll_time = 0.0
+    last_status_log_time = 0.0
     live_games_cache = []
+    current_phase = pt.get_phase(state)
     BALANCE_REFRESH_SECONDS = 3600
+    STATUS_LOG_INTERVAL = 1800  # log daily P&L status every 30 min
     consecutive_errors = 0
 
     while True:
         try:
             now = time.time()
+
+            # ── Daily profit target phase check ───────────────────────
+            new_phase = pt.get_phase(state)
+            if new_phase != current_phase:
+                pt.notify_milestone(state, notifier, current_phase)
+                current_phase = new_phase
+
+            if not pt.should_trade(current_phase):
+                if now - last_status_log_time >= STATUS_LOG_INTERVAL:
+                    log.info("Trading paused: %s", pt.status_line(state))
+                    last_status_log_time = now
+                time.sleep(POLL_INTERVAL_SECONDS)
+                continue
+
+            # ── Status log every 30 min ───────────────────────────────
+            if now - last_status_log_time >= STATUS_LOG_INTERVAL:
+                log.info(pt.status_line(state))
+                last_status_log_time = now
 
             # ── Refresh live balance hourly ───────────────────────────
             if now - last_balance_check >= BALANCE_REFRESH_SECONDS:

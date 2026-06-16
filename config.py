@@ -119,8 +119,10 @@ TIME_DECAY_MAX_PRICE = 0.15        # ...and price is below 15c, cut losses
 ALLOWED_CATEGORIES = []            # e.g. ["SPORTS", "CRYPTO"]
 
 # ---- Portfolio exposure ----
-# Max fraction of YOUR bankroll exposed to any single category
-MAX_CATEGORY_EXPOSURE_PCT = 40.0   # e.g. 40 = max 40% in sports markets at once
+# Max fraction of YOUR bankroll exposed to any single KNOWN category.
+# Set to 0 to disable category limits entirely.
+# Note: markets with unknown/blank category are NOT limited by this.
+MAX_CATEGORY_EXPOSURE_PCT = 0.0   # disabled — category parsing unreliable until fixed
 
 # ---- Execution ----
 DRY_RUN = os.environ.get("DRY_RUN", "true").lower() != "false"

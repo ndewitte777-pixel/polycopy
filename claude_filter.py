@@ -129,75 +129,100 @@ def evaluate_trade(market_info: dict, price: float, your_size: float,
     prompt = build_prompt(market_info, price, your_size, conviction,
                           trader_bankroll, usdc_size)
 
-    try:
-        resp = requests.post(
-            ANTHROPIC_URL,
-            headers={
-                "x-api-key": ANTHROPIC_API_KEY,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
-            json={
-                "model": CLAUDE_MODEL,
-                "max_tokens": 256,
-                "system": SYSTEM_PROMPT,
-                "messages": [{"role": "user", "content": prompt}],
-            },
-            timeout=15,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        raw_text = data["content"][0]["text"].strip()
+    for attempt in range(2):  # retry once on empty response
+        try:
+            resp = requests.post(
+                ANTHROPIC_URL,
+                headers={
+                    "x-api-key": ANTHROPIC_API_KEY,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": CLAUDE_MODEL,
+                    "max_tokens": 256,
+                    "system": SYSTEM_PROMPT,
+                    "messages": [{"role": "user", "content": prompt}],
+                },
+                timeout=15,
+            )
+            resp.raise_for_status()
+            data = resp.json()
 
-        # Strip markdown fences if present
-        if raw_text.startswith("```"):
-            raw_text = raw_text.split("```")[1]
-            if raw_text.startswith("json"):
-                raw_text = raw_text[4:]
-        raw_text = raw_text.strip()
+            # Handle empty or malformed response
+            content = data.get("content", [])
+            if not content or not content[0].get("text", "").strip():
+                log.warning("Claude filter returned empty response (attempt %d)", attempt + 1)
+                if attempt == 0:
+                    import time as _time
+                    _time.sleep(2)
+                    continue
+                break
 
-        decision = json.loads(raw_text)
+            raw_text = content[0]["text"].strip()
 
-        # Validate required fields
-        decision.setdefault("decision", "BUY")
-        decision.setdefault("confidence", 50)
-        decision.setdefault("reason", "No reason given")
-        decision.setdefault("suggested_size_pct", 100)
+            # Strip markdown fences
+            if "```" in raw_text:
+                parts = raw_text.split("```")
+                raw_text = parts[1] if len(parts) > 1 else parts[0]
+                if raw_text.startswith("json"):
+                    raw_text = raw_text[4:]
+            raw_text = raw_text.strip()
 
-        log.info(
-            "Claude filter: %s (confidence=%d, size_pct=%d) | %s",
-            decision["decision"],
-            decision["confidence"],
-            decision["suggested_size_pct"],
-            decision["reason"],
-        )
-        return decision
+            # Find JSON object within response
+            start = raw_text.find("{")
+            end = raw_text.rfind("}") + 1
+            if start >= 0 and end > start:
+                raw_text = raw_text[start:end]
 
-    except Exception as e:
-        log.warning("Claude filter error (%s) — proceeding with trade anyway", e)
-        return {"decision": "BUY", "confidence": 100,
-                "reason": f"Filter error: {e}", "suggested_size_pct": 100}
+            decision = json.loads(raw_text)
+            decision.setdefault("decision", "BUY")
+            decision.setdefault("confidence", 50)
+            decision.setdefault("reason", "No reason given")
+            decision.setdefault("suggested_size_pct", 100)
+
+            log.info(
+                "Claude filter: %s (confidence=%d, size_pct=%d) | %s",
+                decision["decision"],
+                decision["confidence"],
+                decision["suggested_size_pct"],
+                decision["reason"],
+            )
+            return decision
+
+        except Exception as e:
+            log.warning("Claude filter error (attempt %d): %s — proceeding with trade", attempt + 1, e)
+            if attempt == 0:
+                import time as _time
+                _time.sleep(2)
+                continue
+            break
+
+    # Fail open — if Claude is unavailable, proceed with trade
+    return {"decision": "BUY", "confidence": 100,
+            "reason": "Claude unavailable — proceeding", "suggested_size_pct": 100}
 
 
-def apply_decision(decision: dict, planned_size: float) -> tuple[bool, float]:
+def apply_decision(decision: dict, planned_size: float,
+                   min_confidence: int = None) -> tuple[bool, float]:
     """
     Convert Claude's decision into (should_trade, adjusted_size).
     Returns (False, 0) to skip, or (True, adjusted_size) to proceed.
     """
+    if min_confidence is None:
+        min_confidence = CLAUDE_MIN_CONFIDENCE
+
     d = decision.get("decision", "BUY").upper()
     confidence = decision.get("confidence", 100)
     size_pct = decision.get("suggested_size_pct", 100)
 
-    # Hard skip
     if d == "SKIP":
         return False, 0.0
 
-    # Also skip if confidence too low even on a BUY
-    if confidence < CLAUDE_MIN_CONFIDENCE and d != "REDUCE":
+    if confidence < min_confidence and d != "REDUCE":
         return False, 0.0
 
-    # Adjust size
     adjusted = planned_size * (size_pct / 100)
-    adjusted = max(adjusted, 1.0)  # minimum $1
+    adjusted = max(adjusted, 1.0)
 
     return True, adjusted

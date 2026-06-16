@@ -1,46 +1,60 @@
 """
 Live Scalping Engine
 ====================
-Monitors open positions during live sports events and executes quick
-profit-taking exits when price moves favorably, rather than holding
-to market resolution.
+Monitors open positions during live sports events and decides whether to:
+1. SCALP — exit quickly at small profit (game is risky/uncertain)
+2. RIDE  — hold the position (Claude is confident team will win)
+3. HOLD  — not enough movement yet, keep monitoring
 
-Strategy:
-- During a live game, prices move fast on scoring events
-- If we're up X% on a position AND the game situation is risky
-  (close score, late in game, momentum shifting), sell immediately
-- This is better than holding and risking a reversal
-
-Scalp triggers (any one sufficient to sell):
-1. Price up SCALP_PROFIT_PCT% from entry (default 5 cents / ~15-25%)
-2. Price up SCALP_MIN_CENTS from entry in absolute terms (default $0.05)
-3. Game situation turns risky (opponent scores, momentum shifts)
-4. Market liquidity drops significantly (sign of informed selling)
-
-Unlike the position_monitor (which runs every 60s), the scalper runs
-every LIVE_POLL_INTERVAL seconds (default 20s) for live game lots.
+Claude makes the ride/scalp decision when price has moved enough to
+consider exiting, using live game context (score, clock, momentum).
 """
 
 import time
 import logging
 import requests
+import json
 
 from config import (
     CLOB_API_URL,
+    ANTHROPIC_API_KEY,
+    CLAUDE_MODEL,
     DRY_RUN,
 )
 
 log = logging.getLogger("polycopy.scalper")
 
-# ── Scalping config (can be moved to config.py if desired) ──────────────────
-SCALP_PROFIT_PCT   = 15.0   # sell if up this % from entry
-SCALP_MIN_CENTS    = 0.05   # sell if price moved up at least this much (absolute)
-SCALP_MAX_HOLD_MINUTES = 45 # force-sell any live position after this many minutes
-RISK_SCORE_THRESHOLD = 0.65 # sell if game risk score exceeds this
+SCALP_MIN_CENTS     = 0.05   # minimum price gain before considering exit
+SCALP_PROFIT_PCT    = 15.0   # % gain that triggers the ride/scalp decision
+SCALP_MAX_HOLD_MINS = 90     # hard force-exit after this long regardless
+HARD_STOP_PCT       = -40.0  # always cut losses at this level
+
+RIDE_SYSTEM_PROMPT = """You are an expert live sports prediction market trader.
+
+A position is currently profitable. You must decide: SCALP (sell now) or RIDE (hold for bigger gain).
+
+Consider:
+- Current game score and time remaining
+- How dominant is the leading team?
+- Is there realistic risk of a comeback?
+- How much profit is already locked in vs how much more is realistically available?
+- Is the market price already close to 0.90+ (most value already captured)?
+
+Respond ONLY with valid JSON:
+{
+  "decision": "SCALP" or "RIDE",
+  "confidence": <integer 0-100>,
+  "reason": "<one sentence>",
+  "ride_target_price": <float, if RIDE: what price to sell at later, e.g. 0.85>
+}
+
+Guidelines:
+- RIDE if: team is clearly dominant, significant time left, market price still has room to grow
+- SCALP if: game is close, late in match, comeback is realistic, or market already near ceiling
+- If confidence < 60 on RIDE, default to SCALP — protect the profit"""
 
 
 def get_current_price(token_id: str, session: requests.Session) -> float:
-    """Fetch current midpoint price for a token."""
     try:
         r = session.get(
             f"{CLOB_API_URL}/midpoint",
@@ -54,77 +68,88 @@ def get_current_price(token_id: str, session: requests.Session) -> float:
         return 0.0
 
 
-def compute_game_risk(game: dict | None, lot: dict) -> float:
+def ask_claude_ride_or_scalp(lot: dict, current_price: float,
+                              game_context: str) -> dict:
+    """Ask Claude whether to ride or scalp a profitable position."""
+    if not ANTHROPIC_API_KEY:
+        return {"decision": "SCALP", "confidence": 100,
+                "reason": "No API key — defaulting to scalp", "ride_target_price": current_price}
+
+    entry_price = lot.get("entry_price", current_price)
+    size_usdc = lot.get("size_usdc", 0)
+    market_info = lot.get("market_info", {})
+    question = market_info.get("question", "Unknown")
+    outcome = market_info.get("outcome", "?")
+    end_date = market_info.get("end_date", "")
+
+    pct_gain = ((current_price - entry_price) / entry_price * 100) if entry_price else 0
+    token_qty = size_usdc / entry_price if entry_price else 0
+    unrealized_pnl = (token_qty * current_price) - size_usdc
+
+    prompt = f"""POSITION STATUS:
+Market: {question}
+Our bet: {outcome}
+Entry price: {entry_price:.3f} | Current price: {current_price:.3f}
+Gain: +{pct_gain:.1f}% (${unrealized_pnl:+.2f} unrealized)
+Position size: ${size_usdc:.2f}
+Market closes: {end_date or 'unknown'}
+
+{f'LIVE GAME DATA:{chr(10)}{game_context}' if game_context else 'No live game data available.'}
+
+Should we SCALP now (take the {pct_gain:.1f}% gain) or RIDE for more?
+Respond with JSON only."""
+
+    try:
+        resp = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": ANTHROPIC_API_KEY,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": CLAUDE_MODEL,
+                "max_tokens": 200,
+                "system": RIDE_SYSTEM_PROMPT,
+                "messages": [{"role": "user", "content": prompt}],
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        raw = resp.json()["content"][0]["text"].strip()
+        if "```" in raw:
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        decision = json.loads(raw.strip())
+        decision.setdefault("decision", "SCALP")
+        decision.setdefault("confidence", 50)
+        decision.setdefault("reason", "")
+        decision.setdefault("ride_target_price", current_price * 1.1)
+
+        log.info(
+            "Claude ride/scalp: %s (conf=%d, target=%.3f) | %s",
+            decision["decision"], decision["confidence"],
+            decision.get("ride_target_price", 0), decision["reason"],
+        )
+        return decision
+
+    except Exception as e:
+        log.warning("Claude ride/scalp failed (%s) — defaulting to SCALP", e)
+        return {"decision": "SCALP", "confidence": 100,
+                "reason": f"API error: {e}", "ride_target_price": current_price}
+
+
+def should_exit(lot: dict, current_price: float, game_context: str) -> tuple[bool, str]:
     """
-    Returns a risk score 0-1 for a live lot given current game state.
-    Higher = more reason to exit quickly.
-    0.0 = safe to hold | 1.0 = exit immediately
-    """
-    if not game:
-        return 0.0
-
-    risk = 0.0
-    teams = game.get("teams", [])
-    period = game.get("period", 0)
-    clock = game.get("clock", "")
-    sport = game.get("sport", "soccer")
-    outcome = lot.get("market_info", {}).get("outcome", "").lower()
-
-    # Parse scores
-    scores = {}
-    for t in teams:
-        scores[t.get("name", "").lower()] = int(t.get("score", 0) or 0)
-
-    score_values = list(scores.values())
-    if len(score_values) >= 2:
-        score_diff = abs(score_values[0] - score_values[1])
-        # Close game = higher risk
-        if score_diff == 0:
-            risk += 0.3  # tied = uncertain
-        elif score_diff == 1:
-            risk += 0.1  # one goal/point lead
-
-    # Late in game = higher stakes
-    if sport in ("soccer", "world_cup"):
-        # Soccer: 2 halves of 45 min each
-        if period >= 2:
-            risk += 0.2
-        # Try to parse clock minutes
-        try:
-            minutes = int(clock.replace("'", "").split(":")[0])
-            if minutes > 75:
-                risk += 0.25  # last 15 min
-            elif minutes > 60:
-                risk += 0.1
-        except Exception:
-            pass
-    elif sport == "nba":
-        if period >= 4:
-            risk += 0.3
-        try:
-            parts = clock.split(":")
-            mins = int(parts[0])
-            if mins < 3:
-                risk += 0.25
-        except Exception:
-            pass
-    elif sport in ("nfl",):
-        if period >= 4:
-            risk += 0.35
-
-    # Time held — long live positions get riskier
-    opened_at = lot.get("opened_at", time.time())
-    minutes_held = (time.time() - opened_at) / 60
-    if minutes_held > SCALP_MAX_HOLD_MINUTES:
-        risk += 0.5  # force exit if held too long
-
-    return min(risk, 1.0)
-
-
-def should_scalp(lot: dict, current_price: float, game: dict | None) -> tuple[bool, str]:
-    """
-    Decide whether to scalp (quick-sell) a position.
+    Decide whether to exit now.
     Returns (should_sell, reason).
+
+    Logic:
+    1. Hard stop loss — always exit
+    2. Force exit on max hold time
+    3. If already riding, check ride target
+    4. If price moved enough → ask Claude ride vs scalp
     """
     entry_price = lot.get("entry_price", 0)
     if entry_price <= 0 or current_price <= 0:
@@ -133,28 +158,38 @@ def should_scalp(lot: dict, current_price: float, game: dict | None) -> tuple[bo
     price_change = current_price - entry_price
     pct_change = (price_change / entry_price) * 100
 
-    # 1. Hit profit target in cents
-    if price_change >= SCALP_MIN_CENTS:
-        return True, f"Scalp target hit: +${price_change:.3f} (+{pct_change:.1f}%)"
+    # 1. Hard stop loss
+    if pct_change <= HARD_STOP_PCT:
+        return True, f"Hard stop loss: {pct_change:.1f}% from entry"
 
-    # 2. Hit profit % target
-    if pct_change >= SCALP_PROFIT_PCT:
-        return True, f"Scalp profit %: +{pct_change:.1f}% from entry"
-
-    # 3. Game risk too high while in profit
-    if game and pct_change > 0:
-        risk = compute_game_risk(game, lot)
-        if risk >= RISK_SCORE_THRESHOLD:
-            return True, (
-                f"High game risk ({risk:.2f}) while profitable "
-                f"(+{pct_change:.1f}%) — locking in gains"
-            )
-
-    # 4. Force exit on very long live hold
+    # 2. Force exit after max hold time while profitable
     opened_at = lot.get("opened_at", time.time())
-    minutes_held = (time.time() - opened_at) / 60
-    if minutes_held > SCALP_MAX_HOLD_MINUTES and pct_change > 0:
-        return True, f"Max hold time ({SCALP_MAX_HOLD_MINUTES}min) reached while profitable"
+    mins_held = (time.time() - opened_at) / 60
+    if mins_held > SCALP_MAX_HOLD_MINS and pct_change > 0:
+        return True, f"Max hold time ({SCALP_MAX_HOLD_MINS}min) — locking in profit"
+
+    # 3. Already riding — check if hit target
+    ride_target = lot.get("ride_target_price")
+    if ride_target and lot.get("riding"):
+        if current_price >= ride_target:
+            return True, f"🏇 Ride target hit: {current_price:.3f} >= {ride_target:.3f}"
+        return False, ""  # still riding, wait for target
+
+    # 4. Price moved enough to decide — ask Claude
+    if price_change >= SCALP_MIN_CENTS or pct_change >= SCALP_PROFIT_PCT:
+        decision = ask_claude_ride_or_scalp(lot, current_price, game_context)
+
+        if decision["decision"] == "RIDE" and decision["confidence"] >= 60:
+            lot["riding"] = True
+            lot["ride_target_price"] = decision.get("ride_target_price", current_price * 1.15)
+            lot["ride_reason"] = decision["reason"]
+            log.info(
+                "RIDING position | target=%.3f | %s",
+                lot["ride_target_price"], decision["reason"],
+            )
+            return False, ""
+        else:
+            return True, f"Claude says SCALP | {decision['reason']}"
 
     return False, ""
 
@@ -162,16 +197,11 @@ def should_scalp(lot: dict, current_price: float, game: dict | None) -> tuple[bo
 def run_scalper(open_lots: dict, executor, state: dict,
                 session: requests.Session, live_games: list,
                 notifier) -> int:
-    """
-    Main entry — called from bot.py on each live poll interval.
-    Checks all open lots marked as live-game or source=claude_autonomous
-    for scalping opportunities.
-    Returns number of scalps executed.
-    """
+    """Called from bot.py every LIVE_POLL_INTERVAL seconds."""
     if not open_lots:
         return 0
 
-    scalps = 0
+    exits = 0
 
     for token_id, lots in list(open_lots.items()):
         if not lots:
@@ -186,63 +216,63 @@ def run_scalper(open_lots: dict, executor, state: dict,
             market_info = lot.get("market_info", {})
             question = market_info.get("question", "")
 
-            # Find matching live game for this lot
-            matched_game = None
+            # Match live game context
+            game_context = ""
             best_score = 0.0
             for game in live_games:
-                from sports_data import match_game_to_market
+                from sports_data import match_game_to_market, format_game_context
                 score = match_game_to_market(game, question)
                 if score > best_score:
                     best_score = score
-                    matched_game = game
+                    if score >= 0.4:
+                        game_context = format_game_context(game)
 
-            # Only use game context if it's a strong match
-            game_context = matched_game if best_score >= 0.4 else None
-
-            sell, reason = should_scalp(lot, current_price, game_context)
+            sell, reason = should_exit(lot, current_price, game_context)
 
             if sell:
                 entry_price = lot["entry_price"]
                 size_usdc = lot["size_usdc"]
                 token_qty = size_usdc / entry_price if entry_price else 0
-                exit_value = token_qty * current_price
-                pnl_usdc = exit_value - size_usdc
+                pnl_usdc = (token_qty * current_price) - size_usdc
+                was_riding = lot.get("riding", False)
 
                 log.info(
-                    "SCALP EXIT | %s | entry=%.3f exit=%.3f pnl=$%.3f | %s",
+                    "%s | %s | entry=%.3f exit=%.3f pnl=$%.3f | %s",
+                    "RIDE→SELL" if was_riding else "SCALP",
                     question[:60], entry_price, current_price, pnl_usdc, reason,
                 )
 
                 executor.place_order(
-                    token_id=token_id,
-                    side="SELL",
-                    price=current_price,
-                    size_usdc=size_usdc,
+                    token_id=token_id, side="SELL",
+                    price=current_price, size_usdc=size_usdc,
                 )
 
                 if pnl_usdc < 0:
                     state["daily_loss"] = state.get("daily_loss", 0.0) + abs(pnl_usdc)
 
+                import state as _st
+                _st.record_pnl(state, pnl_usdc)
+
                 result = "WIN" if pnl_usdc > 0 else "LOSS"
                 emoji = "✅" if pnl_usdc > 0 else "❌"
-                game_str = ""
-                if game_context:
-                    from sports_data import format_game_context
-                    game_str = "\n\n" + format_game_context(game_context)
+                mode = "🏇 Ride complete" if was_riding else "⚡ Scalp"
+                ride_info = (
+                    f"\nRode to target {lot.get('ride_target_price', '?'):.3f}"
+                    if was_riding else ""
+                )
 
                 notifier.send(
-                    title=f"⚡ Scalp {result} {emoji} | ${pnl_usdc:+.3f}",
+                    title=f"{mode} {result} {emoji} | ${pnl_usdc:+.3f}",
                     message=(
                         f"{question}\n\n"
                         f"Entry: {entry_price:.3f} → Exit: {current_price:.3f}\n"
                         f"P&L: ${pnl_usdc:+.3f} | Size: ${size_usdc:.2f}\n"
-                        f"Reason: {reason}"
-                        f"{game_str}"
+                        f"Reason: {reason}{ride_info}"
+                        f"{chr(10) + game_context if game_context else ''}"
                     ),
                 )
-                scalps += 1
+                exits += 1
                 state["open_positions"] = max(0, state.get("open_positions", 0) - 1)
-                # Don't keep this lot
             else:
                 remaining_lots.append(lot)
 
@@ -251,4 +281,4 @@ def run_scalper(open_lots: dict, executor, state: dict,
         else:
             open_lots.pop(token_id, None)
 
-    return scalps
+    return exits

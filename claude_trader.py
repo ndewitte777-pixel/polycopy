@@ -106,41 +106,75 @@ def fetch_active_markets(session: requests.Session, limit: int = 80,
     - short_term: closes within 2 days (same day or next day)
     - long_term: closes in 2-30 days
     """
-    try:
-        url = f"{GAMMA_API_URL}/markets"
-        params = {
-            "active": "true",
-            "closed": "false",
-            "limit": limit,
-            "order": "endDate",
-            "ascending": "true",  # soonest first
-        }
-        r = session.get(url, params=params, timeout=15)
-        r.raise_for_status()
-        markets = r.json()
+    for attempt in range(2):
+        try:
+            url = f"{GAMMA_API_URL}/markets"
+            params = {
+                "active": "true",
+                "closed": "false",
+                "limit": limit,
+                "order": "endDate",
+                "ascending": "true",
+            }
+            r = session.get(url, params=params, timeout=30)
+            r.raise_for_status()
+            markets = r.json()
+            break
+        except Exception as e:
+            log.warning("Market fetch attempt %d failed: %s", attempt + 1, e)
+            if attempt == 0:
+                import time as _time
+                _time.sleep(3)
+                continue
+            log.error("Failed to fetch active markets after retry: %s", e)
+            return [], []
 
         now = datetime.now(timezone.utc)
         short_term = []
         long_term = []
+        total_seen = 0
+        skipped_liq = 0
+        skipped_date = 0
+
+        # Handle both list response and nested {"markets": [...]} response
+        if isinstance(markets, dict):
+            markets = markets.get("markets", markets.get("data", []))
 
         for m in markets:
+            total_seen += 1
             liq = float(m.get("liquidity", 0) or 0)
             if liq < min_liquidity:
+                skipped_liq += 1
                 continue
 
-            end_date = m.get("endDate") or m.get("end_date", "")
+            # Try multiple end date field names and formats
+            end_date = (
+                m.get("endDate") or m.get("end_date") or
+                m.get("endDateIso") or m.get("gameStartTime") or ""
+            )
             if not end_date:
+                skipped_date += 1
                 continue
 
             try:
-                end = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
+                # Handle Unix timestamp (integer or string number)
+                if isinstance(end_date, (int, float)) or (
+                    isinstance(end_date, str) and end_date.isdigit()
+                ):
+                    end = datetime.fromtimestamp(int(end_date), tz=timezone.utc)
+                else:
+                    # ISO string
+                    end = datetime.fromisoformat(
+                        str(end_date).replace("Z", "+00:00").replace(" ", "T")
+                    )
+
                 hours_left = (end - now).total_seconds() / 3600
                 days_left = hours_left / 24
 
                 if hours_left < CLAUDE_TRADER_MIN_HOURS_LEFT:
-                    continue  # too close to close
+                    continue
                 if CLAUDE_TRADER_MAX_DAYS_OUT > 0 and days_left > CLAUDE_TRADER_MAX_DAYS_OUT:
-                    continue  # too far out
+                    continue
 
                 m["_hours_left"] = hours_left
                 m["_days_left"] = days_left
@@ -149,18 +183,16 @@ def fetch_active_markets(session: requests.Session, limit: int = 80,
                     short_term.append(m)
                 else:
                     long_term.append(m)
-            except Exception:
+            except Exception as e:
+                log.debug("Date parse failed for '%s': %s", end_date, e)
                 continue
 
         log.info(
-            "Markets found: %d same/next-day, %d longer-term",
+            "Markets: %d total, %d low-liq, %d no-date → %d same/next-day, %d longer-term",
+            total_seen, skipped_liq, skipped_date,
             len(short_term), len(long_term),
         )
         return short_term, long_term
-
-    except Exception as e:
-        log.error("Failed to fetch active markets: %s", e)
-        return [], []
 
 
 def time_horizon_multiplier(days_left: float) -> float:
