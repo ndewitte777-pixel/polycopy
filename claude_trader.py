@@ -101,6 +101,24 @@ Respond with JSON only."""
 def fetch_active_markets(session: requests.Session, limit: int = 100,
                          min_liquidity: float = 500) -> tuple[list, list]:
     """
+    Fetch active markets from Kalshi or Polymarket depending on EXCHANGE setting.
+    Returns (short_term_markets, long_term_markets).
+    """
+    import os
+    exchange = os.environ.get("EXCHANGE", "kalshi").lower()
+
+    if exchange == "kalshi":
+        from kalshi_data import get_markets, format_markets_for_claude
+        markets = get_markets(limit=limit)
+        if not markets:
+            return [], []
+        # Filter by liquidity
+        markets = [m for m in markets
+                   if float(m.get("liquidity") or m.get("open_interest") or 0) >= min_liquidity]
+        return format_markets_for_claude(markets)
+
+    # Polymarket path (original logic below)
+    """
     Fetch active markets sorted by time horizon.
     Returns (short_term_markets, long_term_markets) where:
     - short_term: closes within 2 days (same day or next day)
@@ -268,8 +286,12 @@ def time_horizon_label(days_left: float) -> str:
 
 
 def parse_price(market: dict) -> float:
-    """Extract best YES price from market data."""
-    # Try outcomePrices first (JSON string)
+    """Extract best YES price from market data (Kalshi or Polymarket)."""
+    # Kalshi normalized format
+    if "_source" in market and market["_source"] == "kalshi":
+        return float(market.get("yes_price", 0.5) or 0.5)
+
+    # Polymarket format
     raw = market.get("outcomePrices") or ""
     if isinstance(raw, str) and raw:
         try:
@@ -289,7 +311,12 @@ def parse_price(market: dict) -> float:
 
 
 def parse_token_id(market: dict, side: str = "YES") -> str:
-    """Extract CLOB token ID for YES or NO outcome."""
+    """Extract CLOB token ID (Polymarket) or ticker (Kalshi) for order placement."""
+    # Kalshi uses ticker directly
+    if market.get("_source") == "kalshi":
+        return market.get("ticker", "")
+
+    # Polymarket — parse clobTokenIds JSON string
     raw = market.get("clobTokenIds") or ""
     if isinstance(raw, str):
         try:
@@ -365,45 +392,58 @@ def ask_claude(market: dict, live_game_context: str = "") -> dict | None:
         description=(description or "No additional description.") + live_context_str,
     )
 
-    try:
-        resp = requests.post(
-            ANTHROPIC_URL,
-            headers={
-                "x-api-key": ANTHROPIC_API_KEY,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
-            json={
-                "model": CLAUDE_MODEL,
-                "max_tokens": 300,
-                "system": SYSTEM_PROMPT,
-                "messages": [{"role": "user", "content": prompt}],
-            },
-            timeout=20,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        raw = data["content"][0]["text"].strip()
+    for attempt in range(3):
+        try:
+            resp = requests.post(
+                ANTHROPIC_URL,
+                headers={
+                    "x-api-key": ANTHROPIC_API_KEY,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": CLAUDE_MODEL,
+                    "max_tokens": 300,
+                    "system": SYSTEM_PROMPT,
+                    "messages": [{"role": "user", "content": prompt}],
+                },
+                timeout=20,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            content = data.get("content", [])
+            if not content or not content[0].get("text", "").strip():
+                if attempt < 2:
+                    import time as _t; _t.sleep(2); continue
+                return None
 
-        # Strip markdown fences
-        if "```" in raw:
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-        raw = raw.strip()
+            raw = content[0]["text"].strip()
+            # Extract JSON
+            start = raw.find("{")
+            end = raw.rfind("}") + 1
+            if start >= 0 and end > start:
+                raw = raw[start:end]
+            elif "```" in raw:
+                raw = raw.split("```")[1]
+                if raw.startswith("json"):
+                    raw = raw[4:]
+                raw = raw.strip()
 
-        decision = json.loads(raw)
-        decision.setdefault("decision", "PASS")
-        decision.setdefault("my_probability", price)
-        decision.setdefault("edge", 0.0)
-        decision.setdefault("confidence", 0)
-        decision.setdefault("reason", "")
-        decision.setdefault("suggested_size_pct", 0)
-        return decision
+            decision = json.loads(raw.strip())
+            decision.setdefault("decision", "PASS")
+            decision.setdefault("my_probability", price)
+            decision.setdefault("edge", 0.0)
+            decision.setdefault("confidence", 0)
+            decision.setdefault("reason", "")
+            decision.setdefault("suggested_size_pct", 0)
+            return decision
 
-    except Exception as e:
-        log.warning("Claude evaluation failed for '%s': %s", question[:50], e)
-        return None
+        except Exception as e:
+            log.warning("Claude evaluation failed for '%s' (attempt %d): %s",
+                        question[:50], attempt + 1, e)
+            if attempt < 2:
+                import time as _t; _t.sleep(2); continue
+            return None
 
 
 def kelly_size_from_edge(my_prob: float, price: float,

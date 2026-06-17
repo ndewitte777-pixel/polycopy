@@ -1,48 +1,63 @@
 """
-Execution layer: wraps py-clob-client.
-Uses API keys for authentication AND private key for order signing.
-Both are required by py-clob-client to place orders on Polymarket.
+Execution layer - supports both Kalshi and Polymarket.
+Set EXCHANGE=kalshi or EXCHANGE=polymarket in Railway Variables.
+Default is kalshi since it works in the US without restrictions.
 
-Set in Railway Variables:
-- CLOB_API_KEY       : from Polymarket profile -> API Keys
-- CLOB_API_SECRET    : from Polymarket profile -> API Keys  
-- CLOB_API_PASSPHRASE: from Polymarket profile -> API Keys
-- PRIVATE_KEY        : your wallet private key (for signing orders)
+Kalshi setup:
+- KALSHI_API_KEY_ID   : from kalshi.com Settings -> API
+- KALSHI_PRIVATE_KEY  : RSA private key PEM (paste full key)
+- KALSHI_USE_DEMO     : "true" for paper trading first
+
+Polymarket setup (requires VPN/non-US):
+- PRIVATE_KEY         : wallet private key
+- CLOB_API_KEY/SECRET/PASSPHRASE
 """
 
+import os
 import logging
 import requests
-from config import (
-    CLOB_API_KEY, CLOB_API_SECRET, CLOB_API_PASSPHRASE,
-    CLOB_API_URL, POLYGON_CHAIN_ID, DRY_RUN, YOUR_BANKROLL_USDC,
-)
+from config import DRY_RUN, YOUR_BANKROLL_USDC
 
 log = logging.getLogger("polycopy.executor")
+
+EXCHANGE = os.environ.get("EXCHANGE", "kalshi").lower()
 
 
 class Executor:
     def __init__(self):
         self.client = None
+        self.exchange = EXCHANGE
         if not DRY_RUN:
             self._init_client()
 
     def _init_client(self):
-        import os
+        if self.exchange == "kalshi":
+            self._init_kalshi()
+        else:
+            self._init_polymarket()
+
+    def _init_kalshi(self):
+        from kalshi_client import KalshiClient
+        api_key_id = os.environ.get("KALSHI_API_KEY_ID", "")
+        private_key = os.environ.get("KALSHI_PRIVATE_KEY", "")
+        use_demo = os.environ.get("KALSHI_USE_DEMO", "true").lower() == "true"
+
+        if not api_key_id or not private_key:
+            raise RuntimeError(
+                "KALSHI_API_KEY_ID and KALSHI_PRIVATE_KEY must be set in Railway Variables."
+            )
+
+        self.client = KalshiClient(api_key_id, private_key, use_demo=use_demo)
+        log.info("Kalshi executor ready (%s mode)", "DEMO" if use_demo else "LIVE")
+
+    def _init_polymarket(self):
         from py_clob_client.client import ClobClient
         from py_clob_client.clob_types import ApiCreds
-
-        if not CLOB_API_KEY or not CLOB_API_SECRET:
-            raise RuntimeError(
-                "CLOB_API_KEY or CLOB_API_SECRET is empty. "
-                "Set them in Railway Variables."
-            )
+        from config import CLOB_API_KEY, CLOB_API_SECRET, CLOB_API_PASSPHRASE, CLOB_API_URL, POLYGON_CHAIN_ID
 
         private_key = os.environ.get("PRIVATE_KEY", "")
-        if not private_key:
-            raise RuntimeError(
-                "PRIVATE_KEY is required for signing orders. "
-                "Set it in Railway Variables (your wallet private key)."
-            )
+        if not private_key or not CLOB_API_KEY:
+            raise RuntimeError("Polymarket requires PRIVATE_KEY and CLOB_API_KEY.")
 
         self.client = ClobClient(
             CLOB_API_URL,
@@ -54,68 +69,93 @@ class Executor:
                 api_passphrase=CLOB_API_PASSPHRASE,
             ),
         )
-        log.info("CLOB client initialized (LIVE TRADING ENABLED)")
+        log.info("Polymarket executor ready (LIVE)")
 
-    # ------------------------------------------------------------
+    # ── Balance ───────────────────────────────────────────────────
     def get_balance(self) -> float:
-        """Fetch real USDC balance via Polygon RPC."""
         if DRY_RUN or not self.client:
             return YOUR_BANKROLL_USDC
-
         try:
-            import os
-            private_key = os.environ.get("PRIVATE_KEY", "")
-            if not private_key:
-                return YOUR_BANKROLL_USDC
-
-            # Derive address from private key
-            from eth_account import Account
-            address = Account.from_key(private_key).address
-
-            USDC_CONTRACT = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
-            data = "0x70a08231" + address[2:].lower().zfill(64)
-            payload = {
-                "jsonrpc": "2.0",
-                "method": "eth_call",
-                "params": [{"to": USDC_CONTRACT, "data": data}, "latest"],
-                "id": 1,
-            }
-            resp = requests.post("https://polygon-rpc.com", json=payload, timeout=8)
-            result = resp.json().get("result", "0x0")
-            raw = int(result, 16) / 1_000_000
-            log.info("Live wallet balance: $%.2f USDC", raw)
-            return raw if raw > 0 else YOUR_BANKROLL_USDC
-
+            if self.exchange == "kalshi":
+                bal = self.client.get_balance()
+                log.info("Kalshi balance: $%.2f USDC", bal)
+                return bal if bal > 0 else YOUR_BANKROLL_USDC
+            else:
+                # Polymarket via Polygon RPC
+                private_key = os.environ.get("PRIVATE_KEY", "")
+                if not private_key:
+                    return YOUR_BANKROLL_USDC
+                from eth_account import Account
+                address = Account.from_key(private_key).address
+                USDC = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+                data = "0x70a08231" + address[2:].lower().zfill(64)
+                r = requests.post("https://polygon-rpc.com",
+                                  json={"jsonrpc":"2.0","method":"eth_call",
+                                        "params":[{"to":USDC,"data":data},"latest"],"id":1},
+                                  timeout=8)
+                raw = int(r.json().get("result","0x0"), 16) / 1_000_000
+                return raw if raw > 0 else YOUR_BANKROLL_USDC
         except Exception as e:
-            log.warning("Could not fetch live balance: %s", e)
+            log.warning("Balance fetch failed: %s", e)
             return YOUR_BANKROLL_USDC
 
-    # ------------------------------------------------------------
-    def place_order(self, token_id: str, side: str, price: float, size_usdc: float):
+    # ── Place order ───────────────────────────────────────────────
+    def place_order(self, token_id: str, side: str, price: float,
+                    size_usdc: float) -> dict:
+        """
+        Unified order placement.
+        token_id: Kalshi ticker OR Polymarket token ID
+        side: 'BUY'/'YES' or 'SELL'/'NO'
+        price: 0-1 float
+        size_usdc: dollar amount to spend
+        """
         if DRY_RUN:
             log.info(
-                "[DRY RUN] Would place %s order: token_id=%s price=%.4f size_usdc=%.2f",
-                side, token_id, price, size_usdc,
+                "[DRY RUN] %s | %s %s @ %.4f size=$%.2f",
+                self.exchange.upper(), side, token_id[:20], price, size_usdc,
             )
             return {"dry_run": True, "status": "simulated"}
 
+        if self.exchange == "kalshi":
+            return self._place_kalshi_order(token_id, side, price, size_usdc)
+        else:
+            return self._place_polymarket_order(token_id, side, price, size_usdc)
+
+    def _place_kalshi_order(self, ticker: str, side: str, price: float,
+                             size_usdc: float) -> dict:
+        # Convert USDC amount to contract count
+        # Each Kalshi contract pays $1 on win, costs `price` dollars
+        # count = how many $1 contracts to buy
+        count = max(1, int(size_usdc / price)) if price > 0 else 1
+        kalshi_side = "yes" if side.upper() in ("BUY", "YES") else "no"
+
+        try:
+            resp = self.client.place_order(
+                ticker=ticker,
+                side=kalshi_side,
+                count=count,
+                price_dollars=price,
+            )
+            log.info("Kalshi order placed: %s", resp)
+            return resp
+        except Exception as e:
+            log.error("Kalshi order failed: %s", e)
+            return {"error": str(e)}
+
+    def _place_polymarket_order(self, token_id: str, side: str, price: float,
+                                 size_usdc: float) -> dict:
         from py_clob_client.clob_types import MarketOrderArgs, OrderType
         from py_clob_client.order_builder.constants import BUY, SELL
-
-        side_const = BUY if side == "BUY" else SELL
-
+        side_const = BUY if side.upper() == "BUY" else SELL
         order_args = MarketOrderArgs(
-            token_id=token_id,
-            amount=size_usdc,
-            side=side_const,
-            order_type=OrderType.FOK,
+            token_id=token_id, amount=size_usdc,
+            side=side_const, order_type=OrderType.FOK,
         )
-
         try:
             signed = self.client.create_market_order(order_args)
             resp = self.client.post_order(signed, OrderType.FOK)
-            log.info("Order placed: %s", resp)
+            log.info("Polymarket order placed: %s", resp)
             return resp
         except Exception as e:
-            log.error("Order failed: %s", e)
+            log.error("Polymarket order failed: %s", e)
             return {"error": str(e)}

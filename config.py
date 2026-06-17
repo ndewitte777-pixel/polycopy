@@ -124,7 +124,18 @@ ALLOWED_CATEGORIES = []            # e.g. ["SPORTS", "CRYPTO"]
 # Note: markets with unknown/blank category are NOT limited by this.
 MAX_CATEGORY_EXPOSURE_PCT = 0.0   # disabled — category parsing unreliable until fixed
 
-# ---- Execution ----
+# ---- Exchange selection ----
+# Set EXCHANGE=kalshi (default, works in US) or EXCHANGE=polymarket
+import os as _os
+EXCHANGE = _os.environ.get("EXCHANGE", "kalshi").lower()
+
+# ---- Kalshi credentials ----
+# Get from kalshi.com -> Settings -> API Keys
+KALSHI_API_KEY_ID   = _os.environ.get("KALSHI_API_KEY_ID", "")
+KALSHI_PRIVATE_KEY  = _os.environ.get("KALSHI_PRIVATE_KEY", "")
+KALSHI_USE_DEMO     = _os.environ.get("KALSHI_USE_DEMO", "true").lower() == "true"
+
+
 DRY_RUN = os.environ.get("DRY_RUN", "true").lower() != "false"
 
 # ---- Polymarket API credentials ----
