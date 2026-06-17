@@ -25,8 +25,10 @@ If Claude is unavailable or returns an error, the trade proceeds normally
 """
 
 import json
+import json
 import logging
 import requests
+import time
 from datetime import datetime, timezone
 
 from config import (
@@ -39,6 +41,11 @@ from config import (
 log = logging.getLogger("polycopy.claude_filter")
 
 ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
+
+# Track failures to back off when Claude API is struggling
+_consecutive_failures = 0
+_backoff_until = 0.0
+MAX_BACKOFF_SECONDS = 120
 
 SYSTEM_PROMPT = """You are an expert prediction market trader analyzing trade signals on Kalshi.
 
@@ -117,19 +124,28 @@ def evaluate_trade(market_info: dict, price: float, your_size: float,
     Ask Claude whether to copy this trade.
     Returns a decision dict. On any error, returns a default BUY to fail open.
     """
+    global _consecutive_failures, _backoff_until
+
     if not USE_CLAUDE_FILTER:
         return {"decision": "BUY", "confidence": 100,
                 "reason": "Claude filter disabled", "suggested_size_pct": 100}
 
     if not ANTHROPIC_API_KEY:
-        log.warning("ANTHROPIC_API_KEY not set — Claude filter skipped, proceeding with trade")
+        log.warning("ANTHROPIC_API_KEY not set — Claude filter skipped")
         return {"decision": "BUY", "confidence": 100,
                 "reason": "No API key", "suggested_size_pct": 100}
+
+    # Back off if Claude has been failing repeatedly
+    if time.time() < _backoff_until:
+        remaining = int(_backoff_until - time.time())
+        log.info("Claude filter backing off for %ds due to repeated failures — proceeding", remaining)
+        return {"decision": "BUY", "confidence": 100,
+                "reason": "API backoff", "suggested_size_pct": 100}
 
     prompt = build_prompt(market_info, price, your_size, conviction,
                           trader_bankroll, usdc_size)
 
-    for attempt in range(2):  # retry once on empty response
+    for attempt in range(3):  # retry up to 3 times
         try:
             resp = requests.post(
                 ANTHROPIC_URL,
@@ -144,18 +160,17 @@ def evaluate_trade(market_info: dict, price: float, your_size: float,
                     "system": SYSTEM_PROMPT,
                     "messages": [{"role": "user", "content": prompt}],
                 },
-                timeout=15,
+                timeout=20,
             )
             resp.raise_for_status()
             data = resp.json()
 
-            # Handle empty or malformed response
             content = data.get("content", [])
             if not content or not content[0].get("text", "").strip():
-                log.warning("Claude filter returned empty response (attempt %d)", attempt + 1)
-                if attempt == 0:
+                log.warning("Claude filter empty response (attempt %d)", attempt + 1)
+                if attempt < 2:
                     import time as _time
-                    _time.sleep(2)
+                    _time.sleep(2 ** attempt)  # 1s, 2s backoff
                     continue
                 break
 
@@ -181,6 +196,9 @@ def evaluate_trade(market_info: dict, price: float, your_size: float,
             decision.setdefault("reason", "No reason given")
             decision.setdefault("suggested_size_pct", 100)
 
+            # Reset failure count on success
+            _consecutive_failures = 0
+
             log.info(
                 "Claude filter: %s (confidence=%d, size_pct=%d) | %s",
                 decision["decision"],
@@ -192,13 +210,21 @@ def evaluate_trade(market_info: dict, price: float, your_size: float,
 
         except Exception as e:
             log.warning("Claude filter error (attempt %d): %s — proceeding with trade", attempt + 1, e)
-            if attempt == 0:
+            if attempt < 2:
                 import time as _time
-                _time.sleep(2)
+                _time.sleep(2 ** attempt)
                 continue
             break
 
-    # Fail open — if Claude is unavailable, proceed with trade
+    # All retries failed — track and back off
+    _consecutive_failures += 1
+    if _consecutive_failures >= 3:
+        backoff = min(MAX_BACKOFF_SECONDS, 30 * _consecutive_failures)
+        _backoff_until = time.time() + backoff
+        log.warning("Claude filter failed %d times — backing off for %ds",
+                    _consecutive_failures, backoff)
+
+    # Fail open — proceed with trade
     return {"decision": "BUY", "confidence": 100,
             "reason": "Claude unavailable — proceeding", "suggested_size_pct": 100}
 
