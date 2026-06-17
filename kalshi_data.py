@@ -79,15 +79,39 @@ def get_markets(limit: int = 200, status: str = "open") -> list:
     if not api:
         return []
     try:
-        resp = api.get_markets(status=status, limit=limit)
-        markets = resp.markets if hasattr(resp, "markets") else []
+        # Try different parameter combinations the SDK might expect
+        try:
+            resp = api.get_markets(status=status, limit=limit)
+        except TypeError:
+            try:
+                resp = api.get_markets(limit=limit)
+            except TypeError:
+                resp = api.get_markets()
+
+        # Handle different response shapes
+        if hasattr(resp, "markets"):
+            markets = resp.markets or []
+        elif isinstance(resp, dict):
+            markets = resp.get("markets", resp.get("data", []))
+        elif isinstance(resp, list):
+            markets = resp
+        else:
+            log.warning("Unexpected get_markets response type: %s", type(resp))
+            log.warning("Response: %s", str(resp)[:500])
+            markets = []
+
         result = []
         for m in markets:
             if hasattr(m, "to_dict"):
                 result.append(m.to_dict())
             elif isinstance(m, dict):
                 result.append(m)
+
+        log.info("Fetched %d markets from Kalshi", len(result))
+        if result:
+            log.info("Sample market keys: %s", list(result[0].keys())[:10])
         return result
+
     except Exception as e:
         log.error("Failed to fetch Kalshi markets: %s", e)
         return []
