@@ -109,13 +109,16 @@ def fetch_active_markets(session: requests.Session, limit: int = 100,
     markets = None
     for attempt in range(2):
         try:
+            # Use the events endpoint which returns currently active/upcoming events
+            # sorted by volume - this gives us actual current markets not far-future ones
             url = f"{GAMMA_API_URL}/markets"
             params = {
                 "active": "true",
                 "closed": "false",
                 "limit": limit,
-                "order": "endDate",
-                "ascending": "false",  # descending so we get future markets, not past
+                "order": "volume24hr",
+                "ascending": "false",
+                "end_date_min": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             }
             r = session.get(url, params=params, timeout=30)
             r.raise_for_status()
@@ -132,6 +135,37 @@ def fetch_active_markets(session: requests.Session, limit: int = 100,
 
     if markets is None:
         return [], []
+
+    # If all markets are far-future, try the events endpoint which has nested markets
+    if isinstance(markets, list) and markets:
+        sample_date = markets[0].get("endDate") or markets[0].get("end_date", "")
+        if sample_date:
+            try:
+                sample_end = datetime.fromisoformat(str(sample_date).replace("Z", "+00:00"))
+                if (sample_end - datetime.now(timezone.utc)).days > 365:
+                    log.info("Got far-future markets only, trying events endpoint...")
+                    try:
+                        r2 = session.get(
+                            f"{GAMMA_API_URL}/events",
+                            params={"active": "true", "closed": "false",
+                                    "limit": 50, "order": "volume24hr",
+                                    "ascending": "false"},
+                            timeout=30,
+                        )
+                        r2.raise_for_status()
+                        events_data = r2.json()
+                        items = events_data if isinstance(events_data, list) else events_data.get("data", [])
+                        event_markets = []
+                        for event in items:
+                            for m in event.get("markets", []):
+                                event_markets.append(m)
+                        if event_markets:
+                            markets = event_markets
+                            log.info("Events endpoint returned %d markets", len(markets))
+                    except Exception as e:
+                        log.warning("Events endpoint failed: %s", e)
+            except Exception:
+                pass
 
     now = datetime.now(timezone.utc)
     short_term = []
