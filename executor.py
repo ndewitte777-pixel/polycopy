@@ -90,11 +90,11 @@ class Executor:
             return YOUR_BANKROLL_USDC
         try:
             if self.exchange == "kalshi":
-                bal = self.client.get_balance()
-                log.info("Kalshi balance: $%.2f USDC", bal)
+                from kalshi_data import get_balance as kalshi_get_bal
+                bal = kalshi_get_bal()
+                log.info("Kalshi account balance: $%.2f", bal)
                 return bal if bal > 0 else YOUR_BANKROLL_USDC
             else:
-                # Polymarket via Polygon RPC
                 private_key = os.environ.get("PRIVATE_KEY", "")
                 if not private_key:
                     return YOUR_BANKROLL_USDC

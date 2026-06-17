@@ -153,6 +153,8 @@ DATA_API_URL = "https://data-api.polymarket.com"
 GAMMA_API_URL = "https://gamma-api.polymarket.com"
 
 # ---- Your account ----
+# Fallback bankroll used in DRY_RUN mode or if live balance fetch fails.
+# In live mode the bot reads your actual Kalshi account balance automatically.
 YOUR_BANKROLL_USDC = float(os.environ.get("YOUR_BANKROLL_USDC", "100"))
 
 # ---- Logging / persistence ----

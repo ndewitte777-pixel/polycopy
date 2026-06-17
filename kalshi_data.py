@@ -110,6 +110,7 @@ def get_markets(limit: int = 200, status: str = "open") -> list:
         log.info("Fetched %d markets from Kalshi", len(result))
         if result:
             log.info("Sample market keys: %s", list(result[0].keys())[:10])
+            log.info("Sample market data: %s", str(result[0])[:600])
         return result
 
     except Exception as e:
