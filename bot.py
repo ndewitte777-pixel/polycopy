@@ -1,5 +1,5 @@
 """
-Polymarket Copy-Trading Bot
+Kalshi Copy-Trading Bot
 ===========================
 Features:
 - Copies trades from top leaderboard wallets
@@ -499,7 +499,7 @@ def run():
         return
 
     log.info(
-        "Starting Polymarket copy bot. DRY_RUN=%s | Claude filter=%s | "
+        "Starting Kalshi copy bot. DRY_RUN=%s | Claude filter=%s | "
         "Claude trader=%s (every %dh) | Live scalper=%s (every %ds) | targets=%s",
         DRY_RUN, USE_CLAUDE_FILTER, USE_CLAUDE_TRADER,
         CLAUDE_TRADER_INTERVAL // 3600, USE_LIVE_SCALPER,

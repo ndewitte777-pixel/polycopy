@@ -1,5 +1,5 @@
 """
-Configuration for the Polymarket copy-trading bot.
+Configuration for the Kalshi copy-trading bot.
 
 For Railway deployment, sensitive/environment-specific values are read
 from environment variables (set these in Railway's Variables tab):
@@ -68,7 +68,7 @@ SCALP_PROFIT_PCT = float(os.environ.get("SCALP_PROFIT_PCT", "15.0"))  # % gain t
 SCALP_MIN_CENTS = float(os.environ.get("SCALP_MIN_CENTS", "0.05"))    # $0.05 absolute price gain
 
 # ---- Market time horizon preferences ----
-# Bot trades ALL Polymarket categories (sports, politics, crypto, futures, etc.)
+# Bot trades ALL Kalshi categories (sports, politics, crypto, futures, etc.)
 # but prioritizes same-day and next-day markets with bigger sizes.
 SAME_DAY_SIZE_MULTIPLIER  = float(os.environ.get("SAME_DAY_SIZE_MULTIPLIER",  "1.5"))
 NEXT_DAY_SIZE_MULTIPLIER  = float(os.environ.get("NEXT_DAY_SIZE_MULTIPLIER",  "1.2"))

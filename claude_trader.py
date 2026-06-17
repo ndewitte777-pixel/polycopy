@@ -1,7 +1,7 @@
 """
 Claude Autonomous Trading Engine
 =================================
-Independently scans ALL Polymarket categories for trade opportunities:
+Independently scans ALL Kalshi categories for trade opportunities:
 sports, politics, crypto, economics, pop culture, futures, and more.
 
 Prioritizes same-day and next-day markets (70% of budget) since they
@@ -45,9 +45,9 @@ ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 
 SYSTEM_PROMPT = """You are an expert prediction market trader with deep knowledge of world events, politics, sports, economics, crypto, pop culture, and current affairs.
 
-You trade ALL categories on Polymarket — sports, politics, crypto prices, economic indicators, entertainment, science, weather, futures, and anything else listed. No category is off limits as long as you have genuine knowledge-based edge.
+You trade ALL categories on Kalshi — sports, politics, crypto prices, economic indicators, entertainment, science, weather, futures, and anything else listed. No category is off limits as long as you have genuine knowledge-based edge.
 
-You will be shown active Polymarket prediction markets. For each market, you must:
+You will be shown active Kalshi prediction markets. For each market, you must:
 1. Estimate the TRUE probability of the YES outcome based on your knowledge
 2. Compare it to the current market price (implied probability)
 3. Identify if there is a meaningful edge (your estimate vs market price differs by >8%)
@@ -82,7 +82,7 @@ You must respond ONLY with a valid JSON object:
 If you PASS, set suggested_size_pct to 0. Be honest about uncertainty."""
 
 
-MARKET_PROMPT_TEMPLATE = """Evaluate this Polymarket prediction market:
+MARKET_PROMPT_TEMPLATE = """Evaluate this Kalshi prediction market:
 
 Question: {question}
 Category: {category}
@@ -117,7 +117,7 @@ def fetch_active_markets(session: requests.Session, limit: int = 100,
                    if float(m.get("liquidity") or m.get("open_interest") or 0) >= min_liquidity]
         return format_markets_for_claude(markets)
 
-    # Polymarket path (original logic below)
+    # Polymarket fallback path
     """
     Fetch active markets sorted by time horizon.
     Returns (short_term_markets, long_term_markets) where:
@@ -470,12 +470,12 @@ def kelly_size_from_edge(my_prob: float, price: float,
 def run_claude_trader(executor, state: dict, session: requests.Session,
                       your_bankroll: float, notifier) -> int:
     """
-    Scan all Polymarket categories. Process short-term markets first
+    Scan all Kalshi categories. Process short-term markets first
     with 70% of the trade budget, then longer-term with the remainder.
     """
     from sports_data import fetch_all_live_games, match_game_to_market, format_game_context
 
-    log.info("Claude trader: scanning all Polymarket categories...")
+    log.info("Claude trader: scanning all Kalshi categories...")
     short_term, long_term = fetch_active_markets(session)
 
     if not short_term and not long_term:
@@ -579,7 +579,7 @@ def run_claude_trader(executor, state: dict, session: requests.Session,
             if end_date and "T" in end_date:
                 end_date = end_date.split("T")[0]
             slug = market.get("slug") or ""
-            market_url = f"https://polymarket.com/event/{slug}" if slug else ""
+            market_url = f"https://kalshi.com/markets/{slug}" if slug else ""
 
             category = ""
             tags = market.get("tags") or []

@@ -40,7 +40,7 @@ log = logging.getLogger("polycopy.claude_filter")
 
 ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 
-SYSTEM_PROMPT = """You are an expert prediction market trader analyzing trade signals on Polymarket.
+SYSTEM_PROMPT = """You are an expert prediction market trader analyzing trade signals on Kalshi.
 
 You will be given details about a trade that a top-performing trader has made, and you must decide whether to copy it.
 
@@ -102,7 +102,7 @@ Betting on: {outcome}
 Current price: {price:.3f} (implied probability: {implied_prob:.1f}%)
 Time until close: {time_str}
 Market liquidity: ${liquidity:,.0f} USDC
-Conviction: {conviction} top-ranked Polymarket trader(s) bought this outcome
+Conviction: {conviction} top-ranked Kalshi trader(s) bought this outcome
 Their position size: ${usdc_size:.2f} ({their_pct:.2f}% of their estimated bankroll)
 Our planned size: ${your_size:.2f}
 Market URL: {url}

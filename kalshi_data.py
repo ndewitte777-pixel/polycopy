@@ -16,14 +16,59 @@ BASE_URL = "https://trading-api.kalshi.com/trade-api/v2"
 session = requests.Session()
 
 
+def _get_auth_headers() -> dict:
+    """Build Kalshi auth headers for signed requests."""
+    import os
+    import base64
+    import time as _time
+    api_key_id = os.environ.get("KALSHI_API_KEY_ID", "")
+    private_key_pem = os.environ.get("KALSHI_PRIVATE_KEY", "")
+
+    if not api_key_id or not private_key_pem:
+        return {}
+
+    try:
+        from cryptography.hazmat.primitives.serialization import load_pem_private_key
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.asymmetric import padding
+
+        pem = private_key_pem
+        if not pem.strip().startswith("-----"):
+            pem = f"-----BEGIN PRIVATE KEY-----\n{pem}\n-----END PRIVATE KEY-----"
+
+        private_key = load_pem_private_key(pem.encode(), password=None)
+        timestamp_ms = str(int(_time.time() * 1000))
+        path = "/trade-api/v2/markets"
+        msg = timestamp_ms + "GET" + path
+
+        signature = private_key.sign(
+            msg.encode("utf-8"),
+            padding.PSS(
+                mgf=padding.MGF1(hashes.SHA256()),
+                salt_length=padding.PSS.DIGEST_LENGTH,
+            ),
+            hashes.SHA256(),
+        )
+        return {
+            "KALSHI-ACCESS-KEY": api_key_id,
+            "KALSHI-ACCESS-TIMESTAMP": timestamp_ms,
+            "KALSHI-ACCESS-SIGNATURE": base64.b64encode(signature).decode(),
+        }
+    except Exception as e:
+        log.warning("Could not build auth headers: %s", e)
+        return {}
+
+
 def get_markets(limit: int = 200, status: str = "open",
                 min_close_ts: int = None) -> list:
-    """Fetch open markets, optionally filtered by min close time."""
+    """Fetch open markets with authentication."""
     try:
         params = {"limit": limit, "status": status}
         if min_close_ts:
             params["min_close_ts"] = min_close_ts
-        r = session.get(f"{BASE_URL}/markets", params=params, timeout=15)
+        headers = _get_auth_headers()
+        r = session.get(f"{BASE_URL}/markets", params=params,
+                        headers=headers, timeout=15)
         r.raise_for_status()
         return r.json().get("markets", [])
     except Exception as e:
@@ -34,8 +79,10 @@ def get_markets(limit: int = 200, status: str = "open",
 def get_events(limit: int = 100, status: str = "open") -> list:
     """Fetch open events (grouped markets)."""
     try:
+        headers = _get_auth_headers()
         r = session.get(f"{BASE_URL}/events",
-                        params={"limit": limit, "status": status}, timeout=15)
+                        params={"limit": limit, "status": status},
+                        headers=headers, timeout=15)
         r.raise_for_status()
         return r.json().get("events", [])
     except Exception as e:
@@ -46,7 +93,9 @@ def get_events(limit: int = 100, status: str = "open") -> list:
 def get_market_price(ticker: str) -> tuple[float, float]:
     """Returns (yes_price, no_price) as 0-1 floats."""
     try:
-        r = session.get(f"{BASE_URL}/markets/{ticker}", timeout=10)
+        headers = _get_auth_headers()
+        r = session.get(f"{BASE_URL}/markets/{ticker}",
+                        headers=headers, timeout=10)
         r.raise_for_status()
         m = r.json().get("market", r.json())
         yes = float(m.get("yes_ask") or m.get("yes_bid") or 0.5)
@@ -58,12 +107,14 @@ def get_market_price(ticker: str) -> tuple[float, float]:
 
 
 def get_public_trades(ticker: str = None, limit: int = 100) -> list:
-    """Fetch recent public trades (no auth needed)."""
+    """Fetch recent public trades."""
     try:
+        headers = _get_auth_headers()
         params = {"limit": limit}
         if ticker:
             params["ticker"] = ticker
-        r = session.get(f"{BASE_URL}/markets/trades", params=params, timeout=10)
+        r = session.get(f"{BASE_URL}/markets/trades", params=params,
+                        headers=headers, timeout=10)
         r.raise_for_status()
         return r.json().get("trades", [])
     except Exception as e:
