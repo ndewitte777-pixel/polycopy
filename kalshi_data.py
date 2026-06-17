@@ -28,25 +28,30 @@ def _get_api():
         return _api
 
     try:
-        import kalshi_python
-        config = kalshi_python.Configuration()
-        if KALSHI_USE_DEMO:
-            config.host = "https://demo-api.kalshi.co/trade-api/v2"
-        else:
-            config.host = "https://trading-api.kalshi.com/trade-api/v2"
+        from kalshi_python import Configuration, KalshiClient
 
-        email = os.environ.get("KALSHI_EMAIL", "")
-        password = os.environ.get("KALSHI_PASSWORD", "")
+        api_key_id = os.environ.get("KALSHI_API_KEY_ID", "")
+        private_key_pem = os.environ.get("KALSHI_PRIVATE_KEY", "")
 
-        if not email or not password:
-            log.error("KALSHI_EMAIL and KALSHI_PASSWORD must be set in Railway Variables")
+        if not api_key_id or not private_key_pem:
+            log.error("KALSHI_API_KEY_ID and KALSHI_PRIVATE_KEY must be set in Railway Variables")
             return None
 
-        _api = kalshi_python.ApiInstance(
-            email=email,
-            password=password,
-            configuration=config,
+        # Fix PEM formatting if newlines were stripped by Railway
+        pem = private_key_pem.strip()
+        if not pem.startswith("-----"):
+            pem = f"-----BEGIN PRIVATE KEY-----\n{pem}\n-----END PRIVATE KEY-----"
+        elif "\\n" in pem:
+            pem = pem.replace("\\n", "\n")
+
+        config = Configuration(
+            host="https://demo-api.kalshi.co/trade-api/v2" if KALSHI_USE_DEMO
+                 else "https://trading-api.kalshi.com/trade-api/v2"
         )
+        config.api_key_id = api_key_id
+        config.private_key_pem = pem
+
+        _api = KalshiClient(config)
         log.info("Kalshi API authenticated (%s)", "DEMO" if KALSHI_USE_DEMO else "LIVE")
         return _api
     except Exception as e:
@@ -61,8 +66,8 @@ def get_balance() -> float:
         return 0.0
     try:
         resp = api.get_balance()
-        # Balance is in cents
-        return float(resp.balance) / 100
+        bal = resp.balance if hasattr(resp, "balance") else 0
+        return float(bal) / 100
     except Exception as e:
         log.warning("Failed to get balance: %s", e)
         return 0.0
@@ -76,8 +81,13 @@ def get_markets(limit: int = 200, status: str = "open") -> list:
     try:
         resp = api.get_markets(status=status, limit=limit)
         markets = resp.markets if hasattr(resp, "markets") else []
-        # Convert to dicts for compatibility
-        return [m.to_dict() if hasattr(m, "to_dict") else m for m in markets]
+        result = []
+        for m in markets:
+            if hasattr(m, "to_dict"):
+                result.append(m.to_dict())
+            elif isinstance(m, dict):
+                result.append(m)
+        return result
     except Exception as e:
         log.error("Failed to fetch Kalshi markets: %s", e)
         return []

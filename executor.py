@@ -37,17 +37,30 @@ class Executor:
             self._init_polymarket()
 
     def _init_kalshi(self):
-        from kalshi_client import KalshiClient
+        from kalshi_python import Configuration, KalshiClient
         api_key_id = os.environ.get("KALSHI_API_KEY_ID", "")
-        private_key = os.environ.get("KALSHI_PRIVATE_KEY", "")
+        private_key_pem = os.environ.get("KALSHI_PRIVATE_KEY", "")
         use_demo = os.environ.get("KALSHI_USE_DEMO", "true").lower() == "true"
 
-        if not api_key_id or not private_key:
+        if not api_key_id or not private_key_pem:
             raise RuntimeError(
                 "KALSHI_API_KEY_ID and KALSHI_PRIVATE_KEY must be set in Railway Variables."
             )
 
-        self.client = KalshiClient(api_key_id, private_key, use_demo=use_demo)
+        pem = private_key_pem.strip()
+        if not pem.startswith("-----"):
+            pem = f"-----BEGIN PRIVATE KEY-----\n{pem}\n-----END PRIVATE KEY-----"
+        elif "\\n" in pem:
+            pem = pem.replace("\\n", "\n")
+
+        config = Configuration(
+            host="https://demo-api.kalshi.co/trade-api/v2" if use_demo
+                 else "https://trading-api.kalshi.com/trade-api/v2"
+        )
+        config.api_key_id = api_key_id
+        config.private_key_pem = pem
+
+        self.client = KalshiClient(config)
         log.info("Kalshi executor ready (%s mode)", "DEMO" if use_demo else "LIVE")
 
     def _init_polymarket(self):
@@ -123,21 +136,28 @@ class Executor:
 
     def _place_kalshi_order(self, ticker: str, side: str, price: float,
                              size_usdc: float) -> dict:
-        # Convert USDC amount to contract count
-        # Each Kalshi contract pays $1 on win, costs `price` dollars
-        # count = how many $1 contracts to buy
+        import uuid
+        # Convert price (0-1 float) to cents (1-99 int)
+        price_cents = max(1, min(99, int(price * 100)))
+        # Count = number of $1 contracts
         count = max(1, int(size_usdc / price)) if price > 0 else 1
         kalshi_side = "yes" if side.upper() in ("BUY", "YES") else "no"
 
         try:
-            resp = self.client.place_order(
+            from kalshi_python.models import CreateOrderRequest
+            resp = self.client.create_order(CreateOrderRequest(
                 ticker=ticker,
+                action="buy",
+                type="limit",
                 side=kalshi_side,
+                yes_price=price_cents if kalshi_side == "yes" else None,
+                no_price=price_cents if kalshi_side == "no" else None,
                 count=count,
-                price_dollars=price,
-            )
-            log.info("Kalshi order placed: %s", resp)
-            return resp
+                client_order_id=str(uuid.uuid4()),
+            ))
+            result = resp.to_dict() if hasattr(resp, "to_dict") else {"status": "ok"}
+            log.info("Kalshi order placed: %s", result)
+            return result
         except Exception as e:
             log.error("Kalshi order failed: %s", e)
             return {"error": str(e)}
