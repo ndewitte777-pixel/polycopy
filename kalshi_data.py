@@ -131,8 +131,11 @@ def get_market_price(ticker: str) -> tuple[float, float]:
         m = resp.market if hasattr(resp, "market") else resp
         if hasattr(m, "to_dict"):
             m = m.to_dict()
-        yes = float(m.get("yes_ask") or m.get("yes_bid") or 0.5)
-        no = float(m.get("no_ask") or m.get("no_bid") or 0.5)
+        # Kalshi prices are in cents (1-99), convert to 0-1 float
+        yes_raw = m.get("yes_ask") or m.get("yes_bid") or m.get("last_price") or 50
+        no_raw = m.get("no_ask") or m.get("no_bid") or (100 - float(yes_raw))
+        yes = float(yes_raw) / 100
+        no = float(no_raw) / 100
         return yes, no
     except Exception as e:
         log.warning("Price fetch failed for %s: %s", ticker, e)
@@ -170,46 +173,52 @@ def format_markets_for_claude(markets: list) -> tuple[list, list]:
     long_term = []
 
     for m in markets:
-        if isinstance(m, dict):
-            close_time = m.get("close_time") or m.get("expiration_time") or ""
-            ticker = m.get("ticker", "")
-            title = m.get("title") or m.get("subtitle") or ticker
-            yes_ask = float(m.get("yes_ask") or m.get("yes_bid") or 0.5) / 100  # cents to dollars
-            liquidity = float(m.get("open_interest") or m.get("liquidity") or 0)
-            volume = float(m.get("volume") or 0)
-            category = m.get("category") or m.get("event_ticker", "").split("-")[0]
-        else:
+        if not isinstance(m, dict):
+            continue
+
+        # close_time comes back as a datetime object from the SDK
+        close_time = m.get("close_time") or m.get("expiration_time")
+        ticker = m.get("ticker", "")
+        title = m.get("title") or ticker
+        category = m.get("event_ticker", "").split("-")[0] if m.get("event_ticker") else ""
+
+        # Skip non-active markets
+        if m.get("status") not in ("active", "open", None, ""):
             continue
 
         if not close_time:
             continue
 
         try:
-            if isinstance(close_time, (int, float)):
-                end = datetime.fromtimestamp(close_time, tz=timezone.utc)
+            # Handle datetime objects directly (SDK returns these)
+            if isinstance(close_time, datetime):
+                end = close_time
+                if end.tzinfo is None:
+                    end = end.replace(tzinfo=timezone.utc)
+            elif isinstance(close_time, (int, float)):
+                end = datetime.fromtimestamp(float(close_time), tz=timezone.utc)
             else:
                 end = datetime.fromisoformat(str(close_time).replace("Z", "+00:00"))
 
             hours_left = (end - now).total_seconds() / 3600
             days_left = hours_left / 24
 
-            # Debug first market
-            if len(short_term) + len(long_term) == 0:
-                log.info("First market: ticker=%s close_time=%s hours_left=%.1f yes_price=%s",
-                         m.get("ticker","?"), close_time, hours_left,
-                         m.get("yes_ask") or m.get("yes_bid") or "N/A")
-
-            if hours_left < 1 or days_left > 90:
+            if hours_left < 0.5 or days_left > 90:
                 continue
+
+            # Kalshi doesn't return yes_ask in list view — use 0.5 as placeholder
+            # Claude will reason about probability from context, not just price
+            yes_price = float(m.get("yes_ask") or m.get("yes_bid") or
+                             m.get("last_price") or 0.5)
 
             normalized = {
                 "question": title,
                 "ticker": ticker,
                 "slug": ticker,
-                "endDate": close_time,
-                "liquidity": liquidity,
-                "volume": volume,
-                "yes_price": yes_ask,
+                "endDate": end.isoformat(),
+                "liquidity": float(m.get("open_interest") or m.get("liquidity") or 0),
+                "volume": float(m.get("volume") or 0),
+                "yes_price": yes_price,
                 "_hours_left": hours_left,
                 "_days_left": days_left,
                 "_source": "kalshi",
@@ -223,7 +232,8 @@ def format_markets_for_claude(markets: list) -> tuple[list, list]:
             else:
                 long_term.append(normalized)
 
-        except Exception:
+        except Exception as e:
+            log.debug("Skipping market %s: %s", ticker, e)
             continue
 
     short_term.sort(key=lambda m: m["_hours_left"])
