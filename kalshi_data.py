@@ -238,68 +238,6 @@ def _get_auth_headers(method: str = "GET", path: str = "/trade-api/v2/markets") 
         return {}
 
 
-def get_markets(limit: int = 200, status: str = "open",
-                min_close_ts: int = None) -> list:
-    """Fetch open markets with authentication."""
-    path = "/trade-api/v2/markets"
-    try:
-        params = {"limit": limit, "status": status}
-        if min_close_ts:
-            params["min_close_ts"] = min_close_ts
-        headers = _get_auth_headers("GET", path)
-        r = session.get(f"{BASE_URL}/markets", params=params,
-                        headers=headers, timeout=15)
-        r.raise_for_status()
-        return r.json().get("markets", [])
-    except Exception as e:
-        log.error("Failed to fetch Kalshi markets: %s", e)
-        return []
-
-
-def get_events(limit: int = 100, status: str = "open") -> list:
-    """Fetch open events (grouped markets)."""
-    try:
-        headers = _get_auth_headers("GET", "/trade-api/v2/events")
-        r = session.get(f"{BASE_URL}/events",
-                        params={"limit": limit, "status": status},
-                        headers=headers, timeout=15)
-        r.raise_for_status()
-        return r.json().get("events", [])
-    except Exception as e:
-        log.error("Failed to fetch Kalshi events: %s", e)
-        return []
-
-
-def get_market_price(ticker: str) -> tuple[float, float]:
-    """Returns (yes_price, no_price) as 0-1 floats."""
-    try:
-        headers = _get_auth_headers("GET", f"/trade-api/v2/markets/{ticker}")
-        r = session.get(f"{BASE_URL}/markets/{ticker}",
-                        headers=headers, timeout=10)
-        r.raise_for_status()
-        m = r.json().get("market", r.json())
-        yes = float(m.get("yes_ask") or m.get("yes_bid") or 0.5)
-        no = float(m.get("no_ask") or m.get("no_bid") or 0.5)
-        return yes, no
-    except Exception as e:
-        log.warning("Price fetch failed for %s: %s", ticker, e)
-        return 0.5, 0.5
-
-
-def get_public_trades(ticker: str = None, limit: int = 100) -> list:
-    """Fetch recent public trades."""
-    try:
-        headers = _get_auth_headers("GET", "/trade-api/v2/markets/trades")
-        params = {"limit": limit}
-        if ticker:
-            params["ticker"] = ticker
-        r = session.get(f"{BASE_URL}/markets/trades", params=params,
-                        headers=headers, timeout=10)
-        r.raise_for_status()
-        return r.json().get("trades", [])
-    except Exception as e:
-        log.warning("Failed to fetch trades: %s", e)
-        return []
 
 
 def format_markets_for_claude(markets: list) -> tuple[list, list]:
