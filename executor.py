@@ -55,7 +55,7 @@ class Executor:
 
         config = Configuration(
             host="https://demo-api.kalshi.co/trade-api/v2" if use_demo
-                 else "https://trading-api.kalshi.com/trade-api/v2"
+                 else "https://api.elections.kalshi.com/trade-api/v2"
         )
         config.api_key_id = api_key_id
         config.private_key_pem = pem

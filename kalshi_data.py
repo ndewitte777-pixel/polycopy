@@ -20,6 +20,10 @@ KALSHI_USE_DEMO = os.environ.get("KALSHI_USE_DEMO", "true").lower() == "true"
 
 _api = None
 
+# Updated API URLs per Kalshi's migration notice
+KALSHI_LIVE_URL = "https://api.elections.kalshi.com/trade-api/v2"
+KALSHI_DEMO_URL = "https://demo-api.kalshi.co/trade-api/v2"
+
 
 def _get_api():
     """Get or create authenticated Kalshi API instance."""
@@ -45,8 +49,7 @@ def _get_api():
             pem = pem.replace("\\n", "\n")
 
         config = Configuration(
-            host="https://demo-api.kalshi.co/trade-api/v2" if KALSHI_USE_DEMO
-                 else "https://trading-api.kalshi.com/trade-api/v2"
+            host=KALSHI_DEMO_URL if KALSHI_USE_DEMO else KALSHI_LIVE_URL
         )
         config.api_key_id = api_key_id
         config.private_key_pem = pem
@@ -189,6 +192,12 @@ def format_markets_for_claude(markets: list) -> tuple[list, list]:
 
             hours_left = (end - now).total_seconds() / 3600
             days_left = hours_left / 24
+
+            # Debug first market
+            if len(short_term) + len(long_term) == 0:
+                log.info("First market: ticker=%s close_time=%s hours_left=%.1f yes_price=%s",
+                         m.get("ticker","?"), close_time, hours_left,
+                         m.get("yes_ask") or m.get("yes_bid") or "N/A")
 
             if hours_left < 1 or days_left > 90:
                 continue
