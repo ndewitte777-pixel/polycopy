@@ -71,6 +71,7 @@ import claude_trader as ct
 import scalper as sc
 import sports_data as sd
 import profit_targets as pt
+import live_game_buyer as lgb
 
 logging.basicConfig(
     level=logging.INFO,
@@ -557,6 +558,7 @@ def run():
                         your_bankroll, new_balance,
                     )
                 your_bankroll = new_balance
+                state["bankroll"] = your_bankroll
                 last_balance_check = now
 
             # ── Copy trade detection ──────────────────────────────────────
@@ -582,6 +584,8 @@ def run():
             if USE_LIVE_SCALPER and now - last_live_poll_time >= LIVE_POLL_INTERVAL:
                 live_games_cache = sd.fetch_all_live_games(session)
                 open_lots = state.setdefault("open_lots", {})
+
+                # Scalper — exit profitable positions
                 if open_lots and live_games_cache:
                     scalps = sc.run_scalper(
                         open_lots=open_lots,
@@ -593,6 +597,26 @@ def run():
                     )
                     if scalps:
                         log.info("Scalper: %d positions exited", scalps)
+
+                # Live buyer — enter new positions based on momentum
+                if live_games_cache:
+                    # Get current Kalshi markets for matching
+                    from kalshi_data import get_markets, format_markets_for_claude
+                    kalshi_mkts = get_markets(limit=100)
+                    short_term, long_term = format_markets_for_claude(kalshi_mkts)
+                    all_markets = short_term + long_term
+                    if all_markets:
+                        entries = lgb.run_live_buyer(
+                            live_games=live_games_cache,
+                            all_kalshi_markets=all_markets,
+                            executor=executor,
+                            state=state,
+                            session=session,
+                            notifier=notifier,
+                        )
+                        if entries:
+                            log.info("Live buyer: %d new positions opened", entries)
+
                 last_live_poll_time = now
 
             # ── Position monitor (take-profit / stops / time-decay) ───────
