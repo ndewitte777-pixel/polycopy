@@ -2,3 +2,4 @@ requests
 py-clob-client
 eth-account
 cryptography
+kalshi-python
