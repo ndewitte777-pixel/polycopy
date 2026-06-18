@@ -123,45 +123,77 @@ def get_markets(limit: int = 200, status: str = "open") -> list:
             log.warning("Auth header error: %s", e)
             return {}
 
-    # Kalshi series ticker endpoint returns 404 for all sports tickers.
-    # Their sports API only exposes parlay picks, not single-game markets.
-    # We use the general endpoint and filter out parlays to get non-sports markets
-    # (politics, crypto, economics) which are single-question YES/NO contracts.
+    # Kalshi has two separate base URLs:
+    # - api.elections.kalshi.com: politics, economics, crypto (clean single-question markets)
+    # - trading-api.kalshi.com / api.elections.kalshi.com: sports picks/parlays
+    # Try elections API with explicit category filters to get non-parlay markets
 
-    log.info("Series tickers returned 0 markets — Kalshi may only offer parlay picks right now")
-    api = _get_api()
-    if not api:
-        return []
-    try:
+    ELECTIONS_BASE = "https://api.elections.kalshi.com/trade-api/v2"
+    all_markets = []
+    seen_tickers = set()
+
+    import requests as _rq
+    session = _rq.Session()
+
+    for try_base in [ELECTIONS_BASE, base_url]:
+        if all_markets:
+            break
         try:
-            resp = api.get_markets(status=status, limit=limit)
-        except TypeError:
-            resp = api.get_markets()
+            headers = _make_headers("/trade-api/v2/markets")
+            r = session.get(
+                try_base + "/markets",
+                params={"status": status, "limit": limit},
+                headers=headers,
+                timeout=15,
+            )
+            host = try_base.split(".")[1]
+            log.info("Markets from %s → status %d", host, r.status_code)
+            if r.status_code == 200:
+                data = r.json()
+                raw = data.get("markets", [])
+                for m in raw:
+                    ticker = m.get("ticker", "")
+                    if ticker and ticker not in seen_tickers:
+                        seen_tickers.add(ticker)
+                        all_markets.append(m)
+                if all_markets:
+                    log.info("Fetched %d markets from %s", len(all_markets), host)
+                    log.info("Sample market keys: %s", list(all_markets[0].keys())[:10])
+                    log.info("Sample market data: %s", str(all_markets[0])[:300])
+        except Exception as e:
+            log.debug("Fetch from %s failed: %s", try_base, e)
 
-        if hasattr(resp, "markets"):
-            markets = resp.markets or []
-        elif isinstance(resp, dict):
-            markets = resp.get("markets", resp.get("data", []))
-        elif isinstance(resp, list):
-            markets = resp
-        else:
-            markets = []
+    if not all_markets:
+        # Last resort: use SDK
+        log.info("Direct fetch returned 0, trying SDK")
+        api = _get_api()
+        if not api:
+            return []
+        try:
+            try:
+                resp = api.get_markets(status=status, limit=limit)
+            except TypeError:
+                resp = api.get_markets()
+            if hasattr(resp, "markets"):
+                raw = resp.markets or []
+            elif isinstance(resp, dict):
+                raw = resp.get("markets", resp.get("data", []))
+            elif isinstance(resp, list):
+                raw = resp
+            else:
+                raw = []
+            for m in raw:
+                d = m.to_dict() if hasattr(m, "to_dict") else m
+                if isinstance(d, dict):
+                    all_markets.append(d)
+            if all_markets:
+                log.info("Fetched %d markets via SDK", len(all_markets))
+                log.info("Sample market keys: %s", list(all_markets[0].keys())[:10])
+                log.info("Sample market data: %s", str(all_markets[0])[:300])
+        except Exception as e:
+            log.error("SDK market fetch failed: %s", e)
 
-        result = []
-        for m in markets:
-            d = m.to_dict() if hasattr(m, "to_dict") else m
-            if isinstance(d, dict):
-                result.append(d)
-
-        log.info("Fetched %d markets from Kalshi (general endpoint)", len(result))
-        if result:
-            log.info("Sample market keys: %s", list(result[0].keys())[:10])
-            log.info("Sample market data: %s", str(result[0])[:300])
-        return result
-
-    except Exception as e:
-        log.error("Failed to fetch Kalshi markets: %s", e)
-        return []
+    return all_markets
 
 
 def get_market_price(ticker: str) -> tuple[float, float]:
