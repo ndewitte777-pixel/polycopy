@@ -193,6 +193,13 @@ def get_markets(limit: int = 200, status: str = "open") -> list:
         except Exception as e:
             log.error("SDK market fetch failed: %s", e)
 
+    # Try to extract individual game markets from the parlay bundles
+    if all_markets:
+        single_game = get_single_game_markets(all_markets)
+        if single_game:
+            log.info("Adding %d single-game markets extracted from parlay bundles", len(single_game))
+            return single_game
+
     return all_markets
 
 
@@ -241,7 +248,116 @@ def place_order(ticker: str, side: str, count: int, price_cents: int) -> dict:
         return {"error": str(e)}
 
 
-def _is_sports_parlay(market: dict) -> bool:
+def _extract_event_tickers(markets: list) -> set:
+    """Extract individual event tickers from parlay Associated Events fields."""
+    tickers = set()
+    for m in markets:
+        custom_strike = m.get("custom_strike", {})
+        if not isinstance(custom_strike, dict):
+            continue
+        assoc = custom_strike.get("Associated Events", "") or ""
+        for ticker in str(assoc).split(","):
+            ticker = ticker.strip()
+            if ticker and "-" in ticker:
+                # Get the base event ticker (remove leg suffix)
+                # e.g. KXWCGAME-26JUN19BRAHTI → KXWCGAME-26JUN19BRAHTI
+                tickers.add(ticker)
+    return tickers
+
+
+def get_single_game_markets(parlay_markets: list) -> list:
+    """
+    Fetch individual game markets by extracting tickers from parlay bundles
+    and fetching each one directly via the API.
+    """
+    import requests as _rq
+    import base64
+    import time as _time
+
+    api_key_id = os.environ.get("KALSHI_API_KEY_ID", "")
+    private_key_pem = os.environ.get("KALSHI_PRIVATE_KEY", "")
+    base_url = KALSHI_DEMO_URL if KALSHI_USE_DEMO else KALSHI_LIVE_URL
+    ELECTIONS_BASE = "https://api.elections.kalshi.com/trade-api/v2"
+
+    def _make_headers(path: str) -> dict:
+        if not api_key_id or not private_key_pem:
+            return {}
+        try:
+            from cryptography.hazmat.primitives.serialization import load_pem_private_key
+            from cryptography.hazmat.primitives import hashes
+            from cryptography.hazmat.primitives.asymmetric import padding
+            pem = private_key_pem.strip()
+            if not pem.startswith("-----"):
+                pem = f"-----BEGIN PRIVATE KEY-----\n{pem}\n-----END PRIVATE KEY-----"
+            elif "\\n" in pem:
+                pem = pem.replace("\\n", "\n")
+            key = load_pem_private_key(pem.encode(), password=None)
+            ts = str(int(_time.time() * 1000))
+            sig = key.sign(
+                (ts + "GET" + path).encode(),
+                padding.PSS(mgf=padding.MGF1(hashes.SHA256()),
+                            salt_length=padding.PSS.DIGEST_LENGTH),
+                hashes.SHA256(),
+            )
+            return {
+                "KALSHI-ACCESS-KEY": api_key_id,
+                "KALSHI-ACCESS-TIMESTAMP": ts,
+                "KALSHI-ACCESS-SIGNATURE": base64.b64encode(sig).decode(),
+                "Content-Type": "application/json",
+            }
+        except Exception as e:
+            log.warning("Auth error: %s", e)
+            return {}
+
+    # Extract unique event tickers from parlay bundles
+    event_tickers = _extract_event_tickers(parlay_markets)
+    if not event_tickers:
+        return []
+
+    log.info("Found %d individual event tickers in parlay bundles", len(event_tickers))
+
+    # Get unique series (e.g. KXWCGAME, KXMLBGAME) from the tickers
+    series_set = set()
+    for t in event_tickers:
+        parts = t.split("-")
+        if parts:
+            series_set.add(parts[0])
+
+    log.info("Series found: %s", sorted(series_set))
+
+    # Fetch markets for each series
+    session = _rq.Session()
+    all_markets = []
+    seen = set()
+
+    for series in series_set:
+        for try_base in [ELECTIONS_BASE, base_url]:
+            try:
+                path = "/trade-api/v2/markets"
+                headers = _make_headers(path)
+                r = session.get(
+                    try_base + path,
+                    params={"series_ticker": series, "status": "open", "limit": 100},
+                    headers=headers,
+                    timeout=10,
+                )
+                if r.status_code == 200:
+                    data = r.json()
+                    mkts = data.get("markets", [])
+                    for m in mkts:
+                        ticker = m.get("ticker", "")
+                        if ticker and ticker not in seen:
+                            seen.add(ticker)
+                            all_markets.append(m)
+                    if mkts:
+                        log.info("Fetched %d markets for series %s", len(mkts), series)
+                        break
+            except Exception as e:
+                log.debug("Series %s fetch failed: %s", series, e)
+                continue
+
+    log.info("Total single-game markets fetched: %d", len(all_markets))
+    return all_markets
     """Returns True if this is a multi-leg bundle — skip it."""
     ticker = market.get("ticker", "").upper()
     title = market.get("title", "")
