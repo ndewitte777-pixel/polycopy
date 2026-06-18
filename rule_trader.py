@@ -445,9 +445,26 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
         reason = best["reason"]
         team = best.get("team")
 
-        # Find matching Kalshi market — check both direct markets and parlay legs
+        # Find matching Kalshi market — filter by sport first
         target_market = None
         best_score = 0.0
+
+        sport = game.get("sport", "").lower()
+
+        # Define which Kalshi series are relevant per sport
+        SPORT_SERIES = {
+            "mlb": ["KXMLBGAME", "KXMLBTOTAL", "KXMLBSPREAD", "KXMLBHIT",
+                    "KXMLBHR", "KXMLBKS", "KXMLBHRR", "KXMLBTB", "KXMLBRFI"],
+            "nba": ["KXNBAGAME", "KXNBATOTAL", "KXNBASPREAD", "KXNBAPTS"],
+            "nfl": ["KXNFLGAME", "KXNFLTOTAL", "KXNFLSPREAD"],
+            "nhl": ["KXNHLGAME", "KXNHLTOTAL", "KXNHLSPREAD"],
+            "soccer": ["KXWCGAME", "KXWCTOTAL", "KXWCSPREAD", "KXWCBTTS",
+                       "KXWCGOAL", "KXSOCEPL", "KXSOCUCL"],
+            "world_cup": ["KXWCGAME", "KXWCTOTAL", "KXWCSPREAD", "KXWCBTTS", "KXWCGOAL"],
+            "nba": ["KXWNBAGAME", "KXWNBATOTAL", "KXWNBASPREAD", "KXWNBAPTS"],
+        }
+
+        allowed_series = SPORT_SERIES.get(sport, [])
 
         # Build expanded market list including parlay legs
         expanded_markets = list(all_kalshi_markets)
@@ -456,6 +473,14 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
                 expanded_markets.extend(_extract_single_legs(m))
 
         for m in expanded_markets:
+            ticker = m.get("ticker", "")
+
+            # Filter by sport series if we know the sport
+            if allowed_series and ticker:
+                series_prefix = ticker.split("-")[0]
+                if series_prefix not in allowed_series:
+                    continue
+
             q = m.get("question", m.get("title", "")).lower()
             match_score = match_game_to_market(game, q)
 
@@ -463,10 +488,10 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
                 match_score += 0.25
             elif market_type == "SPREAD" and "spread" in q:
                 match_score += 0.25
-            elif market_type == "WIN" and not any(w in q for w in ["spread", "over", "under", "total"]):
+            elif market_type == "WIN" and not any(w in q for w in ["spread", "over", "under", "total", "goal", "hit", "strikeout"]):
                 match_score += 0.15
 
-            if team and team.lower().split()[-1] in q:  # match last word of team name
+            if team and team.lower().split()[-1] in q:
                 match_score += 0.35
 
             if match_score > best_score:
