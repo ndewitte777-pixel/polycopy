@@ -167,16 +167,31 @@ def place_order(ticker: str, side: str, count: int, price_cents: int) -> dict:
 
 
 def _is_parlay(market: dict) -> bool:
-    """Returns True if this is a multi-game parlay — skip it."""
-    ticker = market.get("ticker", "")
+    """Returns True if this is a multi-game or cross-category parlay — skip it."""
+    ticker = market.get("ticker", "").upper()
     title = market.get("title", "")
-    event_ticker = market.get("event_ticker", "")
-    if "MULTIGAME" in ticker.upper() or "MULTIGAME" in event_ticker.upper():
+    event_ticker = market.get("event_ticker", "").upper()
+
+    # Known Kalshi parlay ticker patterns
+    parlay_keywords = ["MULTIGAME", "EXTENDED", "CROSSCATEGORY", "CROSS_CATEGORY",
+                       "MULTI", "COMBO", "PARLAY", "BUNDLE"]
+    for kw in parlay_keywords:
+        if kw in ticker or kw in event_ticker:
+            return True
+
+    # Title with 3+ comma-separated outcomes = multi-leg bet
+    if title and title.count(",") >= 2:
         return True
-    if "EXTENDED" in ticker.upper() and "EXTENDED" in event_ticker.upper():
+
+    # Title mixing multiple team names or over/under in same line
+    title_lower = title.lower()
+    mixed_indicators = ["over", "under", "points scored", "runs scored", "goals scored"]
+    sports_indicators = ["yes ", "no "]
+    has_mixed = any(w in title_lower for w in mixed_indicators)
+    has_multiple_sides = title_lower.count("yes ") + title_lower.count("no ") > 1
+    if has_mixed and has_multiple_sides:
         return True
-    if title and title.count(",") >= 3:
-        return True
+
     return False
 
 
