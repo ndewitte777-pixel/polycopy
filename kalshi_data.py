@@ -232,7 +232,7 @@ def place_order(ticker: str, side: str, count: int, price_cents: int) -> dict:
         return {"error": "Not authenticated"}
     try:
         from kalshi_python.models import CreateOrderRequest
-        resp = api.create_order(CreateOrderRequest(
+        order = CreateOrderRequest(
             ticker=ticker,
             action="buy",
             type="limit",
@@ -241,7 +241,8 @@ def place_order(ticker: str, side: str, count: int, price_cents: int) -> dict:
             no_price=price_cents if side.upper() == "NO" else None,
             count=count,
             client_order_id=str(uuid.uuid4()),
-        ))
+        )
+        resp = api.create_order(order_params=order)
         return resp.to_dict() if hasattr(resp, "to_dict") else {"status": "ok"}
     except Exception as e:
         log.error("Order failed: %s", e)

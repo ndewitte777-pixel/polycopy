@@ -145,16 +145,17 @@ class Executor:
 
         try:
             from kalshi_python.models import CreateOrderRequest
-            resp = self.client.create_order(CreateOrderRequest(
+            order = CreateOrderRequest(
                 ticker=ticker,
                 action="buy",
                 type="limit",
-                side=kalshi_side,
-                yes_price=price_cents if kalshi_side == "yes" else None,
-                no_price=price_cents if kalshi_side == "no" else None,
+                side=kalshi_side.lower(),
+                yes_price=price_cents if kalshi_side.lower() == "yes" else None,
+                no_price=price_cents if kalshi_side.lower() == "no" else None,
                 count=count,
                 client_order_id=str(uuid.uuid4()),
-            ))
+            )
+            resp = self.client.create_order(order_params=order)
             result = resp.to_dict() if hasattr(resp, "to_dict") else {"status": "ok"}
             log.info("Kalshi order placed: %s", result)
             return result
