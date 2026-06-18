@@ -155,7 +155,7 @@ class Executor:
                 count=count,
                 client_order_id=str(uuid.uuid4()),
             )
-            resp = self.client.create_order(order_params=order)
+            resp = self.client.create_order(order)
             result = resp.to_dict() if hasattr(resp, "to_dict") else {"status": "ok"}
             log.info("Kalshi order placed: %s", result)
             return result

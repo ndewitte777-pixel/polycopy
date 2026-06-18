@@ -242,7 +242,7 @@ def place_order(ticker: str, side: str, count: int, price_cents: int) -> dict:
             count=count,
             client_order_id=str(uuid.uuid4()),
         )
-        resp = api.create_order(order_params=order)
+        resp = api.create_order(order)
         return resp.to_dict() if hasattr(resp, "to_dict") else {"status": "ok"}
     except Exception as e:
         log.error("Order failed: %s", e)
