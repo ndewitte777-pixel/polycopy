@@ -166,31 +166,48 @@ def place_order(ticker: str, side: str, count: int, price_cents: int) -> dict:
         return {"error": str(e)}
 
 
+def _is_parlay(market: dict) -> bool:
+    """Returns True if this is a multi-game parlay — skip it."""
+    ticker = market.get("ticker", "")
+    title = market.get("title", "")
+    event_ticker = market.get("event_ticker", "")
+    if "MULTIGAME" in ticker.upper() or "MULTIGAME" in event_ticker.upper():
+        return True
+    if "EXTENDED" in ticker.upper() and "EXTENDED" in event_ticker.upper():
+        return True
+    if title and title.count(",") >= 3:
+        return True
+    return False
+
+
 def format_markets_for_claude(markets: list) -> tuple[list, list]:
-    """Split markets into short_term and long_term lists."""
+    """
+    Split single-game Kalshi markets into short_term and long_term.
+    Filters out multi-game parlay bundles entirely.
+    """
     now = datetime.now(timezone.utc)
     short_term = []
     long_term = []
+    skipped_parlay = 0
 
     for m in markets:
         if not isinstance(m, dict):
             continue
+        if _is_parlay(m):
+            skipped_parlay += 1
+            continue
 
-        # close_time comes back as a datetime object from the SDK
         close_time = m.get("close_time") or m.get("expiration_time")
         ticker = m.get("ticker", "")
         title = m.get("title") or ticker
         category = m.get("event_ticker", "").split("-")[0] if m.get("event_ticker") else ""
 
-        # Skip non-active markets
         if m.get("status") not in ("active", "open", None, ""):
             continue
-
         if not close_time:
             continue
 
         try:
-            # Handle datetime objects directly (SDK returns these)
             if isinstance(close_time, datetime):
                 end = close_time
                 if end.tzinfo is None:
@@ -206,10 +223,9 @@ def format_markets_for_claude(markets: list) -> tuple[list, list]:
             if hours_left < 0.5 or days_left > 90:
                 continue
 
-            # Kalshi doesn't return yes_ask in list view — use 0.5 as placeholder
-            # Claude will reason about probability from context, not just price
-            yes_price = float(m.get("yes_ask") or m.get("yes_bid") or
-                             m.get("last_price") or 0.5)
+            yes_price = float(m.get("yes_ask") or m.get("yes_bid") or m.get("last_price") or 50)
+            if yes_price > 1:
+                yes_price = yes_price / 100
 
             normalized = {
                 "question": title,
@@ -238,126 +254,8 @@ def format_markets_for_claude(markets: list) -> tuple[list, list]:
 
     short_term.sort(key=lambda m: m["_hours_left"])
     long_term.sort(key=lambda m: m["_hours_left"])
-
     log.info(
-        "Kalshi markets: %d total → %d same/next-day, %d longer-term",
-        len(markets), len(short_term), len(long_term),
-    )
-    return short_term, long_term
-
-
-
-def _get_auth_headers(method: str = "GET", path: str = "/trade-api/v2/markets") -> dict:
-    """Build Kalshi auth headers for signed requests."""
-    import os
-    import base64
-    import time as _time
-    api_key_id = os.environ.get("KALSHI_API_KEY_ID", "")
-    private_key_pem = os.environ.get("KALSHI_PRIVATE_KEY", "")
-
-    if not api_key_id or not private_key_pem:
-        log.warning("KALSHI_API_KEY_ID or KALSHI_PRIVATE_KEY not set in env vars")
-        return {}
-
-    try:
-        from cryptography.hazmat.primitives.serialization import load_pem_private_key
-        from cryptography.hazmat.primitives import hashes
-        from cryptography.hazmat.primitives.asymmetric import padding
-
-        pem = private_key_pem.strip()
-        if not pem.startswith("-----"):
-            pem = f"-----BEGIN PRIVATE KEY-----\n{pem}\n-----END PRIVATE KEY-----"
-
-        private_key = load_pem_private_key(pem.encode(), password=None)
-        timestamp_ms = str(int(_time.time() * 1000))
-        # Kalshi signs: timestamp + method + path (no query string)
-        msg = timestamp_ms + method.upper() + path
-
-        signature = private_key.sign(
-            msg.encode("utf-8"),
-            padding.PSS(
-                mgf=padding.MGF1(hashes.SHA256()),
-                salt_length=padding.PSS.DIGEST_LENGTH,
-            ),
-            hashes.SHA256(),
-        )
-        return {
-            "KALSHI-ACCESS-KEY": api_key_id,
-            "KALSHI-ACCESS-TIMESTAMP": timestamp_ms,
-            "KALSHI-ACCESS-SIGNATURE": base64.b64encode(signature).decode(),
-            "Content-Type": "application/json",
-        }
-    except Exception as e:
-        log.warning("Could not build auth headers: %s", e)
-        return {}
-
-
-
-
-def format_markets_for_claude(markets: list) -> tuple[list, list]:
-    """
-    Split markets into short_term (closes within 2 days) and long_term.
-    Returns (short_term, long_term) lists with normalized fields.
-    """
-    now = datetime.now(timezone.utc)
-    short_term = []
-    long_term = []
-
-    for m in markets:
-        close_time = m.get("close_time") or m.get("expiration_time") or ""
-        if not close_time:
-            continue
-
-        try:
-            if isinstance(close_time, (int, float)):
-                end = datetime.fromtimestamp(close_time, tz=timezone.utc)
-            else:
-                end = datetime.fromisoformat(
-                    str(close_time).replace("Z", "+00:00")
-                )
-
-            hours_left = (end - now).total_seconds() / 3600
-            days_left = hours_left / 24
-
-            if hours_left < 1:
-                continue  # too close
-            if days_left > 90:
-                continue  # too far out
-
-            # Normalize to same shape as Polymarket markets
-            yes_ask = float(m.get("yes_ask") or m.get("yes_bid") or 0.5)
-            liquidity = float(m.get("liquidity") or m.get("open_interest") or 0)
-
-            normalized = {
-                "question": m.get("title") or m.get("subtitle") or m.get("ticker", ""),
-                "ticker": m.get("ticker", ""),
-                "slug": m.get("ticker", ""),
-                "endDate": close_time,
-                "liquidity": liquidity,
-                "volume": float(m.get("volume") or 0),
-                "yes_price": yes_ask,
-                "_hours_left": hours_left,
-                "_days_left": days_left,
-                "_source": "kalshi",
-                "tags": [{"label": m.get("category", "")}],
-                # For compatibility with polymarket code paths
-                "clobTokenIds": None,
-                "outcomes": '["Yes","No"]',
-            }
-
-            if days_left <= 2:
-                short_term.append(normalized)
-            else:
-                long_term.append(normalized)
-
-        except Exception:
-            continue
-
-    short_term.sort(key=lambda m: m["_hours_left"])
-    long_term.sort(key=lambda m: m["_hours_left"])
-
-    log.info(
-        "Kalshi markets: %d total → %d same/next-day, %d longer-term",
-        len(markets), len(short_term), len(long_term),
+        "Kalshi markets: %d total (%d parlays filtered) → %d same/next-day, %d longer-term",
+        len(markets), skipped_parlay, len(short_term), len(long_term),
     )
     return short_term, long_term
