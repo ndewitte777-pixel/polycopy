@@ -144,8 +144,7 @@ class Executor:
         kalshi_side = "yes" if side.upper() in ("BUY", "YES") else "no"
 
         try:
-            from kalshi_python.models import CreateOrderRequest
-            order = CreateOrderRequest(
+            resp = self.client.create_order(
                 ticker=ticker,
                 action="buy",
                 type="limit",
@@ -155,7 +154,6 @@ class Executor:
                 count=count,
                 client_order_id=str(uuid.uuid4()),
             )
-            resp = self.client.create_order(order)
             result = resp.to_dict() if hasattr(resp, "to_dict") else {"status": "ok"}
             log.info("Kalshi order placed: %s", result)
             return result

@@ -266,11 +266,22 @@ def _extract_event_tickers(markets: list) -> set:
     return tickers
 
 
+_single_game_cache: list = []
+_single_game_cache_time: float = 0.0
+_SINGLE_GAME_CACHE_TTL = 300  # refresh every 5 minutes
+
+
 def get_single_game_markets(parlay_markets: list) -> list:
     """
-    Fetch individual game markets by extracting tickers from parlay bundles
-    and fetching each one directly via the API.
+    Fetch individual game markets by extracting tickers from parlay bundles.
+    Results are cached for 5 minutes to avoid hammering the API.
     """
+    global _single_game_cache, _single_game_cache_time
+    import time as _t
+
+    # Return cached results if fresh
+    if _single_game_cache and _t.time() - _single_game_cache_time < _SINGLE_GAME_CACHE_TTL:
+        return _single_game_cache
     import requests as _rq
     import base64
     import time as _time
@@ -364,6 +375,8 @@ def get_single_game_markets(parlay_markets: list) -> list:
                 continue
 
     log.info("Total single-game markets fetched: %d", len(all_markets))
+    _single_game_cache = all_markets
+    _single_game_cache_time = _t.time()
     return all_markets
 
 
