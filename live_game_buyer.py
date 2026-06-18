@@ -90,10 +90,43 @@ Be conservative — only flag genuine edges, not hunches."""
 
 
 def build_game_prompt(game: dict, kalshi_markets: list) -> str:
-    """Build a prompt giving Claude full game context and available markets."""
-    from sports_data import format_game_context
-    game_str = format_game_context(game)
+    """Build a concise prompt giving Claude game context and available markets."""
     sport = game.get("sport", "unknown").upper()
+    teams = game.get("teams", [])
+    clock = game.get("clock", "")
+    period = game.get("period", "")
+    status = game.get("status", "")
+
+    # Compact score line
+    score_parts = []
+    for t in teams:
+        score_parts.append(f"{t.get('name','?')} {t.get('score','0')} ({t.get('home_away','')})")
+    score_line = " vs ".join(score_parts)
+
+    # Recent plays (max 2)
+    plays = game.get("recent_plays", [])[-2:]
+    plays_str = "; ".join(f"{p.get('period','')} {p.get('clock','')}: {p.get('text','')}" for p in plays)
+    if not plays_str:
+        plays_str = "None"
+
+    # Markets (max 4, keep short)
+    market_lines = []
+    for m in kalshi_markets[:4]:
+        q = m.get("question", "?")[:60]
+        yes = m.get("yes_price", 0.5)
+        ticker = m.get("ticker", "?")
+        market_lines.append(f"- {q} | YES={yes:.2f} | {ticker}")
+    markets_str = "\n".join(market_lines) if market_lines else "No matching markets"
+
+    return f"""LIVE {sport} GAME:
+{score_line}
+Time: {clock} | Period: {period} | {status}
+Recent scoring: {plays_str}
+
+AVAILABLE KALSHI MARKETS:
+{markets_str}
+
+Is there a profitable bet right now? Respond with JSON only."""
 
     # Get extended stats if available
     teams = game.get("teams", [])
@@ -122,71 +155,6 @@ def build_game_prompt(game: dict, kalshi_markets: list) -> str:
             f"Rebounds: {game.get('rebounds', 'N/A')}",
             f"Pace (pts per 100 poss): {game.get('pace', 'N/A')}",
         ])
-
-    # NFL-specific
-    elif sport == "NFL":
-        stats_lines.extend([
-            f"Total yards: {game.get('total_yards', 'N/A')}",
-            f"Yards per play: {game.get('yards_per_play', 'N/A')}",
-            f"Red zone trips: {game.get('red_zone', 'N/A')}",
-            f"Time of possession: {game.get('time_of_possession', 'N/A')}",
-            f"Turnovers: {game.get('turnovers', 'N/A')}",
-        ])
-
-    # MLB-specific
-    elif sport == "MLB":
-        stats_lines.extend([
-            f"Hits: {game.get('hits', 'N/A')}",
-            f"Errors: {game.get('errors', 'N/A')}",
-            f"LOB (runners left on base): {game.get('lob', 'N/A')}",
-            f"Pitch count: {game.get('pitch_count', 'N/A')}",
-            f"Strikeouts: {game.get('strikeouts', 'N/A')}",
-        ])
-
-    # UFC-specific
-    elif sport in ("UFC", "MMA"):
-        stats_lines.extend([
-            f"Strikes landed: {game.get('strikes_landed', 'N/A')}",
-            f"Takedowns: {game.get('takedowns', 'N/A')}",
-            f"Submission attempts: {game.get('submissions', 'N/A')}",
-            f"Control time: {game.get('control_time', 'N/A')}",
-        ])
-
-    stats_str = "\n".join(stats_lines) if stats_lines else "Detailed stats not available"
-
-    # Available Kalshi markets for this game
-    markets_str = ""
-    if kalshi_markets:
-        market_lines = []
-        for m in kalshi_markets[:6]:  # max 6 markets
-            ticker = m.get("ticker", "?")
-            question = m.get("question", "?")[:80]
-            yes_price = m.get("yes_price", 0.5)
-            hours = m.get("_hours_left", 0)
-            market_lines.append(
-                f"- {question} | YES={yes_price:.2f} ({yes_price*100:.0f}%) "
-                f"| closes in {hours:.1f}h | ticker: {ticker}"
-            )
-        markets_str = "\n".join(market_lines)
-    else:
-        markets_str = "No specific Kalshi markets found for this game"
-
-    return f"""LIVE GAME SITUATION:
-{game_str}
-
-DETAILED STATS:
-{stats_str}
-
-RECENT SCORING PLAYS:
-{_format_recent_plays(game)}
-
-AVAILABLE KALSHI MARKETS FOR THIS GAME:
-{markets_str}
-
-Based on what is ACTUALLY HAPPENING in this game right now, is there a profitable bet?
-Consider win probability, spread coverage, and total scoring pace.
-Respond with JSON only."""
-
 
 def _format_recent_plays(game: dict) -> str:
     plays = game.get("recent_plays", [])

@@ -515,6 +515,16 @@ def run():
     your_bankroll = executor.get_balance()
     log.info("Starting bankroll: $%.2f USDC", your_bankroll)
 
+    # Clean up stale Polymarket token IDs (very long numeric strings)
+    open_lots = state.setdefault("open_lots", {})
+    stale = [k for k in list(open_lots.keys()) if k.isdigit() and len(k) > 20]
+    if stale:
+        log.info("Clearing %d stale Polymarket lots from state", len(stale))
+        for k in stale:
+            del open_lots[k]
+        state["open_positions"] = len(open_lots)
+        st.save_state(state)
+
     last_signal_time = time.time()
     last_monitor_time = 0.0
     last_balance_check = time.time()

@@ -55,14 +55,11 @@ Guidelines:
 
 
 def get_current_price(token_id: str, session: requests.Session) -> float:
+    """Fetch current price for a Kalshi market ticker."""
     try:
-        r = session.get(
-            f"{CLOB_API_URL}/midpoint",
-            params={"token_id": token_id},
-            timeout=8,
-        )
-        r.raise_for_status()
-        return float(r.json().get("mid", 0) or 0)
+        from kalshi_data import get_market_price
+        yes_price, _ = get_market_price(token_id)
+        return yes_price
     except Exception as e:
         log.warning("Price fetch failed for %s: %s", token_id[:12], e)
         return 0.0
