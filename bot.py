@@ -72,6 +72,7 @@ import scalper as sc
 import sports_data as sd
 import profit_targets as pt
 import live_game_buyer as lgb
+import rule_trader as rt
 
 logging.basicConfig(
     level=logging.INFO,
@@ -625,6 +626,18 @@ def run():
                         )
                         if entries:
                             log.info("Live buyer: %d new positions opened", entries)
+
+                # Rule-based trader — free, no Claude needed
+                if live_games_cache and all_markets:
+                    rule_entries = rt.run_rule_trader(
+                        live_games=live_games_cache,
+                        all_kalshi_markets=all_markets,
+                        executor=executor,
+                        state=state,
+                        notifier=notifier,
+                    )
+                    if rule_entries:
+                        log.info("Rule trader: %d new positions opened", rule_entries)
 
                 last_live_poll_time = now
 
