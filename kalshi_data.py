@@ -269,7 +269,7 @@ def _extract_event_tickers(markets: list) -> set:
 
 _single_game_cache: list = []
 _single_game_cache_time: float = 0.0
-_SINGLE_GAME_CACHE_TTL = 300  # refresh every 5 minutes
+_SINGLE_GAME_CACHE_TTL = 180  # refresh every 3 minutes
 
 
 def get_single_game_markets(parlay_markets: list) -> list:
@@ -451,11 +451,16 @@ def format_markets_for_claude(markets: list) -> tuple[list, list]:
 
         close_time = m.get("close_time") or m.get("expiration_time")
         ticker = m.get("ticker", "")
-        # Elections API uses different title fields
-        title = (m.get("title") or m.get("subtitle") or
+        # Single-game markets use subtitle, parlay markets use title
+        title = (m.get("subtitle") or m.get("title") or
                  m.get("question") or ticker)
-        category = (m.get("category") or
-                   m.get("event_ticker", "").split("-")[0] if m.get("event_ticker") else "")
+        # Clean up title — remove "?" suffix common in Kalshi
+        if title and title.endswith("?"):
+            pass  # keep it, it's a real question
+        category = ""
+        event_ticker = m.get("event_ticker", "")
+        if event_ticker:
+            category = event_ticker.split("-")[0]
 
         if m.get("status") not in ("active", "open", None, ""):
             continue
@@ -463,16 +468,36 @@ def format_markets_for_claude(markets: list) -> tuple[list, list]:
             continue
 
         try:
-            if isinstance(close_time, datetime):
-                end = close_time
-                if end.tzinfo is None:
-                    end = end.replace(tzinfo=timezone.utc)
-            elif isinstance(close_time, str):
-                end = datetime.fromisoformat(close_time.replace("Z", "+00:00"))
-            elif isinstance(close_time, (int, float)):
-                end = datetime.fromtimestamp(float(close_time), tz=timezone.utc)
-            else:
-                continue
+            # Try to parse date from the ticker itself first
+            # e.g. KXMLBTOTAL-26JUN181610BALSEA → June 18
+            # e.g. KXWCGAME-26JUN18CZERSA → June 18
+            import re as _re
+            ticker_date_match = _re.search(r'(\d{2})([A-Z]{3})(\d{2})', ticker)
+            end = None
+
+            if ticker_date_match:
+                day = int(ticker_date_match.group(3))
+                month_str = ticker_date_match.group(2)
+                year = 2000 + int(ticker_date_match.group(1))
+                month_map = {"JAN":1,"FEB":2,"MAR":3,"APR":4,"MAY":5,"JUN":6,
+                             "JUL":7,"AUG":8,"SEP":9,"OCT":10,"NOV":11,"DEC":12}
+                month = month_map.get(month_str)
+                if month:
+                    from datetime import date as _date
+                    end = datetime(year, month, day, 23, 59, tzinfo=timezone.utc)
+
+            # Fall back to close_time from API
+            if not end:
+                if isinstance(close_time, datetime):
+                    end = close_time
+                    if end.tzinfo is None:
+                        end = end.replace(tzinfo=timezone.utc)
+                elif isinstance(close_time, str):
+                    end = datetime.fromisoformat(close_time.replace("Z", "+00:00"))
+                elif isinstance(close_time, (int, float)):
+                    end = datetime.fromtimestamp(float(close_time), tz=timezone.utc)
+                else:
+                    continue
 
             hours_left = (end - now).total_seconds() / 3600
             days_left = hours_left / 24
@@ -500,7 +525,7 @@ def format_markets_for_claude(markets: list) -> tuple[list, list]:
                 "outcomes": '["Yes","No"]',
             }
 
-            if days_left <= 2:
+            if days_left <= 3:
                 short_term.append(normalized)
             else:
                 long_term.append(normalized)
