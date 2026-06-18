@@ -481,6 +481,17 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
         if not ticker:
             continue
 
+        # Skip if matched to a parlay ticker
+        if any(kw in ticker.upper() for kw in ["MULTIGAME", "EXTENDED", "CROSSCATEGORY", "KXMVE"]):
+            log.info("Rule trader: skipping parlay ticker %s for %s", ticker[:30], game_id)
+            continue
+
+        # Skip if no real market question (placeholder)
+        question = target_market.get("question", target_market.get("title", ""))
+        if not question or question == "?":
+            log.info("Rule trader: no real market question found for %s", game_id)
+            continue
+
         market_price = target_market.get("yes_price", 0.5)
         if bet_side in ("NO", "AWAY", "UNDER"):
             market_price = 1 - market_price

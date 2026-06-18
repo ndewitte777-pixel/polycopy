@@ -106,11 +106,12 @@ def get_markets(limit: int = 200, status: str = "open") -> list:
 
             key = load_pem_private_key(pem.encode(), password=None)
             ts = str(int(_time.time() * 1000))
+            # Must include query string in signing for GET requests
             msg = ts + "GET" + path
             sig = key.sign(
                 msg.encode(),
                 padding.PSS(mgf=padding.MGF1(hashes.SHA256()),
-                            salt_length=padding.PSS.DIGEST_LENGTH),
+                            salt_length=padding.PSS.MAX_LENGTH),
                 hashes.SHA256(),
             )
             return {
@@ -194,12 +195,11 @@ def get_markets(limit: int = 200, status: str = "open") -> list:
             log.error("SDK market fetch failed: %s", e)
 
     # Try to extract individual game markets from the parlay bundles
-    # Disabled for now — elections API returns 404 for all individual event tickers
-    # Will re-enable once correct API endpoint is found
-    # if all_markets:
-    #     single_game = get_single_game_markets(all_markets)
-    #     if single_game:
-    #         return single_game
+    if all_markets:
+        single_game = get_single_game_markets(all_markets)
+        if single_game:
+            log.info("Adding %d single-game markets extracted from parlay bundles", len(single_game))
+            return single_game
 
     return all_markets
 
@@ -292,7 +292,10 @@ def get_single_game_markets(parlay_markets: list) -> list:
     base_url = KALSHI_DEMO_URL if KALSHI_USE_DEMO else KALSHI_LIVE_URL
     ELECTIONS_BASE = "https://api.elections.kalshi.com/trade-api/v2"
 
-    def _make_headers(path: str) -> dict:
+    TRADING_BASE = "https://trading-api.kalshi.com/trade-api/v2"
+
+    def _make_headers(method: str, path: str, query_string: str = "") -> dict:
+        """Build Kalshi auth headers. Path must include query string for GET requests."""
         if not api_key_id or not private_key_pem:
             return {}
         try:
@@ -306,10 +309,12 @@ def get_single_game_markets(parlay_markets: list) -> list:
                 pem = pem.replace("\\n", "\n")
             key = load_pem_private_key(pem.encode(), password=None)
             ts = str(int(_time.time() * 1000))
+            # Include query string in signing message for GET requests
+            sign_path = path + ("?" + query_string if query_string else "")
             sig = key.sign(
-                (ts + "GET" + path).encode(),
+                (ts + method.upper() + sign_path).encode(),
                 padding.PSS(mgf=padding.MGF1(hashes.SHA256()),
-                            salt_length=padding.PSS.DIGEST_LENGTH),
+                            salt_length=padding.PSS.MAX_LENGTH),
                 hashes.SHA256(),
             )
             return {
@@ -343,37 +348,33 @@ def get_single_game_markets(parlay_markets: list) -> list:
     seen = set()
 
     for series, sample_event in list(series_map.items())[:20]:
-        for try_base in [base_url, ELECTIONS_BASE, "https://trading-api.kalshi.com/trade-api/v2"]:
-            try:
-                path = "/trade-api/v2/markets"
-                headers = _make_headers(path)
-                r = session.get(
-                    try_base + path,
-                    params={"event_ticker": sample_event, "status": "open", "limit": 20},
-                    headers=headers,
-                    timeout=8,
-                )
-                log.info("Event %s @ %s → %d", sample_event,
-                         try_base.split("/")[2].split(".")[1], r.status_code)
-                if r.status_code == 200:
-                    data = r.json()
-                    mkts = data.get("markets", [])
-                    if mkts:
-                        for m in mkts:
-                            ticker = m.get("ticker", "")
-                            if ticker and ticker not in seen:
-                                seen.add(ticker)
-                                all_markets.append(m)
-                        log.info("  Got %d markets for %s", len(mkts), series)
-                        break
-                elif r.status_code in (404, 400):
-                    break
-                elif r.status_code == 401:
-                    log.warning("Auth failed @ %s", try_base)
-                    break
-            except Exception as e:
-                log.debug("Event %s failed: %s", sample_event, e)
-                continue
+        try:
+            path = "/trade-api/v2/markets"
+            qs = f"event_ticker={sample_event}&status=open&limit=20"
+            headers = _make_headers("GET", path, qs)
+            r = session.get(
+                TRADING_BASE + "/markets",
+                params={"event_ticker": sample_event, "status": "open", "limit": 20},
+                headers=headers,
+                timeout=8,
+            )
+            log.info("Event %s → %d", sample_event, r.status_code)
+            if r.status_code == 200:
+                data = r.json()
+                mkts = data.get("markets", [])
+                if mkts:
+                    for m in mkts:
+                        ticker = m.get("ticker", "")
+                        if ticker and ticker not in seen:
+                            seen.add(ticker)
+                            all_markets.append(m)
+                    log.info("  Got %d markets for %s", len(mkts), series)
+            elif r.status_code == 401:
+                log.warning("Auth failed for event fetch — %s", r.text[:200])
+                break  # No point trying more if auth is broken
+        except Exception as e:
+            log.debug("Event %s failed: %s", sample_event, e)
+            continue
 
     log.info("Total single-game markets fetched: %d", len(all_markets))
     _single_game_cache = all_markets
