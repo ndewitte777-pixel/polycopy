@@ -316,46 +316,51 @@ def get_single_game_markets(parlay_markets: list) -> list:
 
     log.info("Found %d individual event tickers in parlay bundles", len(event_tickers))
 
-    # Get unique series (e.g. KXWCGAME, KXMLBGAME) from the tickers
-    series_set = set()
-    for t in event_tickers:
-        parts = t.split("-")
-        if parts:
-            series_set.add(parts[0])
-
-    log.info("Series found: %s", sorted(series_set))
-
-    # Fetch markets for each series
+    # Fetch individual events directly using their full event tickers
     session = _rq.Session()
     all_markets = []
     seen = set()
 
-    for series in series_set:
+    # Fetch individual events directly using their full event tickers
+    # This is more reliable than fetching by series
+    session = _rq.Session()
+    all_markets = []
+    seen = set()
+
+    # Fetch each unique event directly
+    fetched_series = set()
+    for event_ticker in list(event_tickers)[:50]:  # limit to 50 to avoid too many calls
+        series = event_ticker.split("-")[0]
+        if series in fetched_series:
+            continue  # already got markets for this series
+
         for try_base in [ELECTIONS_BASE, base_url]:
             try:
                 path = "/trade-api/v2/markets"
                 headers = _make_headers(path)
+                # Try fetching the specific event
                 r = session.get(
                     try_base + path,
-                    params={"event_ticker": series, "status": "open", "limit": 100},
+                    params={"event_ticker": event_ticker, "status": "open", "limit": 20},
                     headers=headers,
-                    timeout=10,
+                    timeout=8,
                 )
                 if r.status_code == 200:
                     data = r.json()
                     mkts = data.get("markets", [])
-                    for m in mkts:
-                        ticker = m.get("ticker", "")
-                        if ticker and ticker not in seen:
-                            seen.add(ticker)
-                            all_markets.append(m)
                     if mkts:
-                        log.info("Fetched %d markets for series %s", len(mkts), series)
+                        for m in mkts:
+                            ticker = m.get("ticker", "")
+                            if ticker and ticker not in seen:
+                                seen.add(ticker)
+                                all_markets.append(m)
+                        log.info("Event %s → %d markets", event_ticker, len(mkts))
+                        fetched_series.add(series)
                         break
                 elif r.status_code == 404:
                     break
             except Exception as e:
-                log.debug("Series %s fetch failed: %s", series, e)
+                log.debug("Event %s failed: %s", event_ticker, e)
                 continue
 
     log.info("Total single-game markets fetched: %d", len(all_markets))
