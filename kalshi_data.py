@@ -337,7 +337,7 @@ def get_single_game_markets(parlay_markets: list) -> list:
                 headers = _make_headers(path)
                 r = session.get(
                     try_base + path,
-                    params={"series_ticker": series, "status": "open", "limit": 100},
+                    params={"event_ticker": series, "status": "open", "limit": 100},
                     headers=headers,
                     timeout=10,
                 )
@@ -352,12 +352,17 @@ def get_single_game_markets(parlay_markets: list) -> list:
                     if mkts:
                         log.info("Fetched %d markets for series %s", len(mkts), series)
                         break
+                elif r.status_code == 404:
+                    break
             except Exception as e:
                 log.debug("Series %s fetch failed: %s", series, e)
                 continue
 
     log.info("Total single-game markets fetched: %d", len(all_markets))
     return all_markets
+
+
+def _is_sports_parlay(market: dict) -> bool:
     """Returns True if this is a multi-leg bundle — skip it."""
     ticker = market.get("ticker", "").upper()
     title = market.get("title", "")
