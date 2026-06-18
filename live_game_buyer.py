@@ -255,6 +255,9 @@ def ask_claude_live(game: dict, kalshi_markets: list) -> dict | None:
                 },
                 timeout=20,
             )
+            if resp.status_code == 400:
+                log.warning("Live buyer 400 error body: %s", resp.text[:300])
+                return None
             resp.raise_for_status()
             content = resp.json().get("content", [])
             if not content or not content[0].get("text", "").strip():

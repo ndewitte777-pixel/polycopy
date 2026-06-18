@@ -112,9 +112,8 @@ def fetch_active_markets(session: requests.Session, limit: int = 100,
         markets = get_markets(limit=limit)
         if not markets:
             return [], []
-        # Filter by liquidity
-        markets = [m for m in markets
-                   if float(m.get("liquidity") or m.get("open_interest") or 0) >= min_liquidity]
+        # Don't filter by liquidity for Kalshi — parlay markets have 0 liquidity
+        # but are still tradeable
         return format_markets_for_claude(markets)
 
     # Polymarket fallback path

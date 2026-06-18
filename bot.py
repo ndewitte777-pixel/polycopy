@@ -610,7 +610,6 @@ def run():
 
                 # Live buyer — enter new positions based on momentum
                 if live_games_cache:
-                    # Get current Kalshi markets for matching
                     from kalshi_data import get_markets, format_markets_for_claude
                     kalshi_mkts = get_markets(limit=100)
                     short_term, long_term = format_markets_for_claude(kalshi_mkts)
