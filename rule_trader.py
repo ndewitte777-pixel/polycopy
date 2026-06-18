@@ -3,36 +3,6 @@ Rule-Based Live Trading Engine
 ================================
 Makes live game betting decisions using pure statistical rules —
 no Claude API calls, zero additional cost.
-
-Rules are based on well-established sports betting patterns:
-
-SOCCER:
-- Team with xG > 1.5 but score 0-0 after 60 min → BUY win/draw
-- Team up 2+ goals after 70 min → BUY to win (secure lead)
-- 0-0 game after 80 min → BUY under 0.5 goals (or draw)
-- Team with 65%+ possession and 5+ shots on target → BUY win
-
-NBA:
-- Team up 15+ points in 4th quarter → BUY to win
-- Pace tracking for over/under (actual vs expected scoring rate)
-- Team on 10+ run without response → BUY momentum
-
-NFL:
-- Team up 2 scores (14+) with under 8 min left → BUY to win
-- Total points pace vs market over/under line
-
-MLB:
-- Pitcher with 8+ strikeouts through 6 innings → BUY under
-- Team up 3+ runs after 7 innings → BUY to win
-- High-scoring pace (5+ runs through 5 innings) → BUY over
-
-NHL:
-- Team up 2+ goals after 2nd period → BUY to win
-- Goalie pulled → BUY team to score next goal
-
-UFC:
-- Fighter landing 60%+ more strikes → BUY to win
-- Fighter with 3+ takedowns → BUY to win by submission/decision
 """
 
 import logging
@@ -44,9 +14,22 @@ log = logging.getLogger("polycopy.rule_trader")
 # Minimum confidence to place a trade (0-100)
 MIN_RULE_CONFIDENCE = 65
 
+# Price range — only bet when there's real uncertainty and real upside
+MIN_BET_PRICE = 0.20   # don't bet on anything cheaper than 20 cents (too speculative)
+MAX_BET_PRICE = 0.80   # don't bet on anything more expensive than 80 cents (too little upside)
+
+# Position limits — quality over quantity
+MAX_OPEN_RULE_POSITIONS = 3   # max 3 open rule trader positions at once
+MAX_DAILY_RULE_TRADES = 8     # max 8 rule trades per day
+
+# Minimum dollar size per bet — no tiny bets
+MIN_BET_SIZE = 1.50
+
 # Cooldown per game to avoid overtrading
-GAME_COOLDOWN_SECONDS = 300
+GAME_COOLDOWN_SECONDS = 600   # 10 minutes between bets on same game
 _game_cooldowns: dict = {}
+_daily_rule_trade_count = 0
+_daily_count_date = ""
 
 
 def _parse_score(score_str) -> int:
@@ -403,14 +386,38 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
     Uses pure rules, no Claude API.
     Returns number of positions opened.
     """
+    global _daily_rule_trade_count, _daily_count_date
+
     if not live_games or not all_kalshi_markets:
         return 0
+
+    # Reset daily count at midnight UTC
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if today != _daily_count_date:
+        _daily_rule_trade_count = 0
+        _daily_count_date = today
 
     entries = 0
     now = time.time()
 
     from config import MAX_TRADE_USDC, KELLY_FRACTION
     from sports_data import match_game_to_market
+
+    # Count current open rule trader positions
+    open_lots = state.get("open_lots", {})
+    rule_positions = sum(
+        1 for lots in open_lots.values()
+        for lot in (lots if isinstance(lots, list) else [lots])
+        if lot.get("source") == "rule_trader"
+    )
+
+    if rule_positions >= MAX_OPEN_RULE_POSITIONS:
+        log.debug("Rule trader: max open positions (%d) reached", MAX_OPEN_RULE_POSITIONS)
+        return 0
+
+    if _daily_rule_trade_count >= MAX_DAILY_RULE_TRADES:
+        log.debug("Rule trader: daily limit (%d) reached", MAX_DAILY_RULE_TRADES)
+        return 0
 
     for game in live_games:
         if not game.get("is_live"):
@@ -532,6 +539,12 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
         if bet_side in ("NO", "AWAY", "UNDER"):
             market_price = 1 - market_price
 
+        # Skip extreme or low-value odds
+        if market_price < MIN_BET_PRICE or market_price > MAX_BET_PRICE:
+            log.info("Rule trader: skipping odds %.2f (outside %.2f-%.2f range) for %s",
+                     market_price, MIN_BET_PRICE, MAX_BET_PRICE, game_id)
+            continue
+
         # Simple Kelly sizing based on confidence edge
         implied_edge = (confidence / 100) - market_price
         if implied_edge <= 0:
@@ -544,6 +557,9 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
         size_usdc = min(max(bankroll * kelly_f, 1.0), MAX_TRADE_USDC)
 
         kalshi_side = "YES" if bet_side in ("YES", "HOME", "OVER") else "NO"
+
+        # Enforce minimum bet size — no tiny bets
+        size_usdc = max(size_usdc, MIN_BET_SIZE)
 
         log.info(
             "RULE TRADE | %s | %s %s | conf=%d | $%.2f\n  %s\n  Market: %s",
@@ -584,6 +600,7 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
         open_lots[ticker] = lots
         state["open_positions"] = state.get("open_positions", 0) + 1
         _game_cooldowns[game_id] = now
+        _daily_rule_trade_count += 1
         entries += 1
 
         notifier.send(
