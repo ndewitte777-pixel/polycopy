@@ -356,6 +356,46 @@ def analyze_game(game: dict) -> list[dict]:
     return rule_fn(game)
 
 
+def _extract_single_legs(market: dict) -> list[dict]:
+    """
+    For Kalshi parlay markets, try to extract individual game legs
+    that might match a single rule. Returns list of virtual single-leg markets.
+    """
+    title = market.get("title", "")
+    ticker = market.get("ticker", "")
+    close_time = market.get("close_time") or market.get("expiration_time")
+
+    # Parse comma-separated legs from title
+    # e.g. "yes Chicago C,yes Baltimore,yes Over 7.5 runs scored"
+    legs = []
+    if title and "," in title:
+        parts = [p.strip() for p in title.split(",")]
+        for part in parts:
+            side = "YES"
+            question = part
+            if part.lower().startswith("yes "):
+                side = "YES"
+                question = part[4:].strip()
+            elif part.lower().startswith("no "):
+                side = "NO"
+                question = part[3:].strip()
+
+            if question:
+                legs.append({
+                    "ticker": ticker,  # use parent ticker for ordering
+                    "question": question,
+                    "yes_price": market.get("yes_price", 0.5),
+                    "_hours_left": market.get("_hours_left", 24),
+                    "_days_left": market.get("_days_left", 1),
+                    "_source": "kalshi",
+                    "_leg_side": side,
+                    "_is_leg": True,
+                    "endDate": str(close_time) if close_time else "",
+                    "liquidity": float(market.get("open_interest") or 0),
+                })
+    return legs
+
+
 def run_rule_trader(live_games: list, all_kalshi_markets: list,
                     executor, state: dict, notifier) -> int:
     """
@@ -405,23 +445,29 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
         reason = best["reason"]
         team = best.get("team")
 
-        # Find matching Kalshi market
+        # Find matching Kalshi market — check both direct markets and parlay legs
         target_market = None
         best_score = 0.0
+
+        # Build expanded market list including parlay legs
+        expanded_markets = list(all_kalshi_markets)
         for m in all_kalshi_markets:
-            q = m.get("question", "").lower()
+            if m.get("title", "").count(",") >= 1:
+                expanded_markets.extend(_extract_single_legs(m))
+
+        for m in expanded_markets:
+            q = m.get("question", m.get("title", "")).lower()
             match_score = match_game_to_market(game, q)
 
-            # Extra scoring for market type match
             if market_type == "TOTAL" and any(w in q for w in ["over", "under", "total", "goals", "runs", "points"]):
-                match_score += 0.2
+                match_score += 0.25
             elif market_type == "SPREAD" and "spread" in q:
-                match_score += 0.2
+                match_score += 0.25
             elif market_type == "WIN" and not any(w in q for w in ["spread", "over", "under", "total"]):
-                match_score += 0.1
+                match_score += 0.15
 
-            if team and team.lower() in q:
-                match_score += 0.3
+            if team and team.lower().split()[-1] in q:  # match last word of team name
+                match_score += 0.35
 
             if match_score > best_score:
                 best_score = match_score

@@ -628,10 +628,18 @@ def run():
                             log.info("Live buyer: %d new positions opened", entries)
 
                 # Rule-based trader — free, no Claude needed
-                if live_games_cache and all_markets:
+                # Pass all markets including parlays so it can extract individual legs
+                if live_games_cache:
+                    from kalshi_data import get_markets
+                    all_raw_markets = get_markets(limit=100)
+                    # Normalize them quickly for the rule trader
+                    from kalshi_data import format_markets_for_claude
+                    short_t, long_t = format_markets_for_claude(all_raw_markets)
+                    # Also pass raw parlay markets for leg extraction
+                    rule_markets = short_t + long_t + all_raw_markets
                     rule_entries = rt.run_rule_trader(
                         live_games=live_games_cache,
-                        all_kalshi_markets=all_markets,
+                        all_kalshi_markets=rule_markets,
                         executor=executor,
                         state=state,
                         notifier=notifier,
@@ -666,7 +674,10 @@ def run():
                     your_bankroll=your_bankroll,
                     notifier=notifier,
                 )
-                log.info("Claude autonomous trader: %d trades placed", trades)
+                if trades:
+                    log.info("Claude autonomous trader: %d trades placed", trades)
+                else:
+                    log.info("Claude autonomous trader: no valid single-question markets available right now")
                 last_claude_trader_time = now
 
             # ── Weekly report ─────────────────────────────────────────────
