@@ -138,35 +138,70 @@ def fetch_all_live_games(session: requests.Session = None) -> list:
     return all_games
 
 
-def match_game_to_market(game: dict, market_question: str) -> float:
+def match_game_to_market(game: dict, market_question: str,
+                         market_ticker: str = "") -> float:
     """
-    Returns a confidence score (0-1) that a game matches a market question.
-    Uses team names and sport keywords.
+    Returns a confidence score (0-1) that a game matches a Kalshi market.
+
+    Primary matching: Kalshi tickers embed team codes and dates.
+    e.g. KXMLBGAME-26JUN172140PITATH → PIT vs ATH on June 17
+         KXWCGAME-26JUN18CZERSA → CZE vs RSA on June 18
+
+    Secondary matching: question text keyword overlap.
     """
-    question_lower = market_question.lower()
     score = 0.0
+    teams = game.get("teams", [])
+    ticker_upper = market_ticker.upper() if market_ticker else ""
 
-    for team in game.get("teams", []):
-        name = team.get("name", "").lower()
-        abbr = team.get("abbreviation", "").lower()
-        if name and name in question_lower:
-            score += 0.5
-        if abbr and abbr in question_lower:
-            score += 0.3
+    # --- Primary: match team abbreviations in Kalshi ticker ---
+    # Kalshi ticker format: KXMLBGAME-26JUN172140PITATH
+    # Date is encoded as YYMMMDD (e.g. 26JUN17 = June 17, 2026)
+    ticker_team_part = ""
+    ticker_date_str = ""
+    if ticker_upper:
+        parts = ticker_upper.split("-")
+        if len(parts) >= 2:
+            last = parts[-1]
+            import re as _re
+            # Extract team codes (letters only at end)
+            team_match = _re.search(r'([A-Z]{6,})$', last)
+            if team_match:
+                ticker_team_part = team_match.group(1)
+            # Extract date (e.g. 26JUN17)
+            date_match = _re.search(r'(\d{2}[A-Z]{3}\d{2})', last)
+            if date_match:
+                ticker_date_str = date_match.group(1)
 
-    # Sport keyword matching
-    sport_keywords = {
-        "soccer": ["win", "goal", "match", "draw", "fc", "united", "city"],
-        "nba": ["nba", "points", "basketball"],
-        "nfl": ["nfl", "touchdown", "football", "superbowl"],
-        "ufc": ["ufc", "fight", "mma", "knockout", "submission"],
-        "mlb": ["mlb", "baseball", "innings", "world series"],
-        "nhl": ["nhl", "hockey", "stanley cup", "goals"],
-    }
-    sport = game.get("sport", "")
-    for kw in sport_keywords.get(sport, []):
-        if kw in question_lower:
-            score += 0.1
+    abbrevs = []
+    full_names = []
+    for team in teams:
+        abbr = team.get("abbreviation", "").upper()
+        name = (team.get("name") or team.get("displayName") or "").lower()
+        if abbr:
+            abbrevs.append(abbr)
+        if name:
+            full_names.append(name)
+            # Also add last word (e.g. "Pittsburgh Pirates" → "pirates")
+            words = name.split()
+            if words:
+                full_names.append(words[-1])
+                full_names.append(words[0])
+
+    # Score ticker abbreviation matches (highest weight)
+    if ticker_team_part and abbrevs:
+        matched_abbrevs = sum(1 for a in abbrevs if a in ticker_team_part)
+        if matched_abbrevs == 2:
+            score += 0.8  # both teams match — very confident
+        elif matched_abbrevs == 1:
+            score += 0.4  # one team matches
+
+    # --- Secondary: question text keyword matching ---
+    q_lower = market_question.lower() if market_question else ""
+    if q_lower:
+        for name in full_names:
+            if name and len(name) > 3 and name in q_lower:
+                score += 0.2
+                break
 
     return min(score, 1.0)
 
