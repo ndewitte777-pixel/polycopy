@@ -194,11 +194,12 @@ def get_markets(limit: int = 200, status: str = "open") -> list:
             log.error("SDK market fetch failed: %s", e)
 
     # Try to extract individual game markets from the parlay bundles
-    if all_markets:
-        single_game = get_single_game_markets(all_markets)
-        if single_game:
-            log.info("Adding %d single-game markets extracted from parlay bundles", len(single_game))
-            return single_game
+    # Disabled for now — elections API returns 404 for all individual event tickers
+    # Will re-enable once correct API endpoint is found
+    # if all_markets:
+    #     single_game = get_single_game_markets(all_markets)
+    #     if single_game:
+    #         return single_game
 
     return all_markets
 
