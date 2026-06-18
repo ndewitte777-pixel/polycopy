@@ -166,38 +166,52 @@ def get_markets(limit: int = 200, status: str = "open") -> list:
         log.debug("Series discovery failed: %s", e)
 
     for series in SERIES_TICKERS:
-        try:
-            path = "/trade-api/v2/markets"
-            params = f"?series_ticker={series}&status={status}&limit=50"
-            headers = _make_headers(path)
-            r = session.get(
-                base_url + path,
-                params={"series_ticker": series, "status": status, "limit": 50},
-                headers=headers,
-                timeout=10,
-            )
-            if r.status_code == 200:
-                data = r.json()
-                markets = data.get("markets", [])
-                for m in markets:
-                    ticker = m.get("ticker", "")
-                    if ticker and ticker not in seen_tickers:
-                        seen_tickers.add(ticker)
-                        all_markets.append(m)
-            elif r.status_code not in (404, 400):
-                log.debug("Series %s returned %d", series, r.status_code)
-        except Exception as e:
-            log.debug("Series %s fetch failed: %s", series, e)
-            continue
+        for endpoint in ["/trade-api/v2/events", "/trade-api/v2/markets"]:
+            try:
+                headers = _make_headers(endpoint)
+                r = session.get(
+                    base_url + endpoint,
+                    params={"series_ticker": series, "status": status, "limit": 50},
+                    headers=headers,
+                    timeout=10,
+                )
+                log.info("Series %s @ %s → %d", series, endpoint, r.status_code)
+                if r.status_code == 200:
+                    data = r.json()
+                    # Events endpoint wraps markets inside event objects
+                    events = data.get("events", [])
+                    if events:
+                        for event in events:
+                            for m in event.get("markets", []):
+                                ticker = m.get("ticker", "")
+                                if ticker and ticker not in seen_tickers:
+                                    seen_tickers.add(ticker)
+                                    all_markets.append(m)
+                        break
+                    # Markets endpoint
+                    markets = data.get("markets", [])
+                    for m in markets:
+                        ticker = m.get("ticker", "")
+                        if ticker and ticker not in seen_tickers:
+                            seen_tickers.add(ticker)
+                            all_markets.append(m)
+                    if markets:
+                        break
+                elif r.status_code == 404:
+                    break  # Series doesn't exist
+                elif r.status_code == 401:
+                    log.warning("Auth failed for series %s", series)
+                    break
+            except Exception as e:
+                log.debug("Series %s @ %s failed: %s", series, endpoint, e)
+                continue
 
     if all_markets:
         log.info("Fetched %d single-game markets via series tickers", len(all_markets))
-        if all_markets:
-            log.info("Sample market data: %s", str(all_markets[0])[:300])
+        log.info("Sample: %s", str(all_markets[0])[:200])
         return all_markets
 
-    # Fallback to SDK general endpoint
-    log.info("Series fetch returned 0, falling back to general endpoint")
+    log.info("Series tickers returned 0 markets — Kalshi may only offer parlay picks right now")
     api = _get_api()
     if not api:
         return []
