@@ -77,21 +77,105 @@ def get_balance() -> float:
 
 
 def get_markets(limit: int = 200, status: str = "open") -> list:
-    """Fetch open markets."""
+    """
+    Fetch open single-game markets using sport-specific series tickers.
+    Uses direct REST calls with auth headers since SDK doesn't support series_ticker.
+    Falls back to general endpoint if series fetch returns nothing useful.
+    """
+    import base64
+    import time as _time
+    import requests as _requests
+
+    api_key_id = os.environ.get("KALSHI_API_KEY_ID", "")
+    private_key_pem = os.environ.get("KALSHI_PRIVATE_KEY", "")
+    base_url = KALSHI_DEMO_URL if KALSHI_USE_DEMO else KALSHI_LIVE_URL
+
+    def _make_headers(path: str) -> dict:
+        if not api_key_id or not private_key_pem:
+            return {}
+        try:
+            from cryptography.hazmat.primitives.serialization import load_pem_private_key
+            from cryptography.hazmat.primitives import hashes
+            from cryptography.hazmat.primitives.asymmetric import padding
+
+            pem = private_key_pem.strip()
+            if not pem.startswith("-----"):
+                pem = f"-----BEGIN PRIVATE KEY-----\n{pem}\n-----END PRIVATE KEY-----"
+            elif "\\n" in pem:
+                pem = pem.replace("\\n", "\n")
+
+            key = load_pem_private_key(pem.encode(), password=None)
+            ts = str(int(_time.time() * 1000))
+            msg = ts + "GET" + path
+            sig = key.sign(
+                msg.encode(),
+                padding.PSS(mgf=padding.MGF1(hashes.SHA256()),
+                            salt_length=padding.PSS.DIGEST_LENGTH),
+                hashes.SHA256(),
+            )
+            return {
+                "KALSHI-ACCESS-KEY": api_key_id,
+                "KALSHI-ACCESS-TIMESTAMP": ts,
+                "KALSHI-ACCESS-SIGNATURE": base64.b64encode(sig).decode(),
+                "Content-Type": "application/json",
+            }
+        except Exception as e:
+            log.warning("Auth header error: %s", e)
+            return {}
+
+    # Sport series tickers for single-game markets
+    SERIES_TICKERS = [
+        "KXNBA", "KXMLB", "KXNFL", "KXNHL",
+        "KXSOCWC", "KXSOCEPL", "KXSOCUCL",
+        "KXUFC", "KXWNBA", "KXNCAAB", "KXNCAAF",
+    ]
+
+    all_markets = []
+    seen_tickers = set()
+    session = _requests.Session()
+
+    for series in SERIES_TICKERS:
+        try:
+            path = "/trade-api/v2/markets"
+            params = f"?series_ticker={series}&status={status}&limit=50"
+            headers = _make_headers(path)
+            r = session.get(
+                base_url + path,
+                params={"series_ticker": series, "status": status, "limit": 50},
+                headers=headers,
+                timeout=10,
+            )
+            if r.status_code == 200:
+                data = r.json()
+                markets = data.get("markets", [])
+                for m in markets:
+                    ticker = m.get("ticker", "")
+                    if ticker and ticker not in seen_tickers:
+                        seen_tickers.add(ticker)
+                        all_markets.append(m)
+            elif r.status_code not in (404, 400):
+                log.debug("Series %s returned %d", series, r.status_code)
+        except Exception as e:
+            log.debug("Series %s fetch failed: %s", series, e)
+            continue
+
+    if all_markets:
+        log.info("Fetched %d single-game markets via series tickers", len(all_markets))
+        if all_markets:
+            log.info("Sample market data: %s", str(all_markets[0])[:300])
+        return all_markets
+
+    # Fallback to SDK general endpoint
+    log.info("Series fetch returned 0, falling back to general endpoint")
     api = _get_api()
     if not api:
         return []
     try:
-        # Try different parameter combinations the SDK might expect
         try:
             resp = api.get_markets(status=status, limit=limit)
         except TypeError:
-            try:
-                resp = api.get_markets(limit=limit)
-            except TypeError:
-                resp = api.get_markets()
+            resp = api.get_markets()
 
-        # Handle different response shapes
         if hasattr(resp, "markets"):
             markets = resp.markets or []
         elif isinstance(resp, dict):
@@ -99,21 +183,18 @@ def get_markets(limit: int = 200, status: str = "open") -> list:
         elif isinstance(resp, list):
             markets = resp
         else:
-            log.warning("Unexpected get_markets response type: %s", type(resp))
-            log.warning("Response: %s", str(resp)[:500])
             markets = []
 
         result = []
         for m in markets:
-            if hasattr(m, "to_dict"):
-                result.append(m.to_dict())
-            elif isinstance(m, dict):
-                result.append(m)
+            d = m.to_dict() if hasattr(m, "to_dict") else m
+            if isinstance(d, dict):
+                result.append(d)
 
-        log.info("Fetched %d markets from Kalshi", len(result))
+        log.info("Fetched %d markets from Kalshi (general endpoint)", len(result))
         if result:
             log.info("Sample market keys: %s", list(result[0].keys())[:10])
-            log.info("Sample market data: %s", str(result[0])[:600])
+            log.info("Sample market data: %s", str(result[0])[:300])
         return result
 
     except Exception as e:
