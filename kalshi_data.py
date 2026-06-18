@@ -330,7 +330,7 @@ def get_single_game_markets(parlay_markets: list) -> list:
     seen = set()
 
     for series, sample_event in list(series_map.items())[:20]:
-        for try_base in [ELECTIONS_BASE, base_url]:
+        for try_base in [base_url, ELECTIONS_BASE, "https://trading-api.kalshi.com/trade-api/v2"]:
             try:
                 path = "/trade-api/v2/markets"
                 headers = _make_headers(path)
@@ -340,7 +340,8 @@ def get_single_game_markets(parlay_markets: list) -> list:
                     headers=headers,
                     timeout=8,
                 )
-                log.info("Event %s @ %s → %d", sample_event, try_base.split(".")[1], r.status_code)
+                log.info("Event %s @ %s → %d", sample_event,
+                         try_base.split("/")[2].split(".")[1], r.status_code)
                 if r.status_code == 200:
                     data = r.json()
                     mkts = data.get("markets", [])
