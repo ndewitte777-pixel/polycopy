@@ -240,7 +240,12 @@ def ask_claude_live(game: dict, kalshi_markets: list) -> dict | None:
 
     for attempt in range(2):
         try:
-            resp = requests.post(
+            # Check global rate limit before calling Claude
+        from claude_rate_limiter import can_call_claude, mark_claude_called
+        if not can_call_claude():
+            return None
+
+        resp = requests.post(
                 ANTHROPIC_URL,
                 headers={
                     "x-api-key": ANTHROPIC_API_KEY,
@@ -259,6 +264,7 @@ def ask_claude_live(game: dict, kalshi_markets: list) -> dict | None:
                 log.warning("Live buyer 400 error body: %s", resp.text[:300])
                 return None
             resp.raise_for_status()
+            mark_claude_called()
             content = resp.json().get("content", [])
             if not content or not content[0].get("text", "").strip():
                 if attempt == 0:

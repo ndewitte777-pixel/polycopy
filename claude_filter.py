@@ -145,7 +145,20 @@ def evaluate_trade(market_info: dict, price: float, your_size: float,
     prompt = build_prompt(market_info, price, your_size, conviction,
                           trader_bankroll, usdc_size)
 
-    for attempt in range(3):  # retry up to 3 times
+    # Skip Claude filter for tiny trades — not worth the API cost
+    if usdc_size < 100:
+        log.info("Skipping Claude filter for small signal ($%.2f) — proceeding", usdc_size)
+        return {"decision": "BUY", "confidence": 100,
+                "reason": "Small signal — filter skipped", "suggested_size_pct": 100}
+
+    # Global rate limit — max 1 Claude call per 30 seconds
+    from claude_rate_limiter import can_call_claude, mark_claude_called
+    if not can_call_claude():
+        log.debug("Claude filter rate limited — proceeding with trade")
+        return {"decision": "BUY", "confidence": 100,
+                "reason": "Rate limited", "suggested_size_pct": 100}
+
+    for attempt in range(3):
         try:
             resp = requests.post(
                 ANTHROPIC_URL,
@@ -198,6 +211,7 @@ def evaluate_trade(market_info: dict, price: float, your_size: float,
 
             # Reset failure count on success
             _consecutive_failures = 0
+            mark_claude_called()
 
             log.info(
                 "Claude filter: %s (confidence=%d, size_pct=%d) | %s",

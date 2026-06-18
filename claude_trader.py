@@ -355,10 +355,12 @@ def ask_claude(market: dict, live_game_context: str = "") -> dict | None:
         return None
 
     end_date = market.get("endDate") or market.get("end_date", "")
-    if end_date and "T" in end_date:
+    if hasattr(end_date, "strftime"):  # datetime object
+        end_date_display = end_date.strftime("%Y-%m-%d")
+    elif end_date and isinstance(end_date, str) and "T" in end_date:
         end_date_display = end_date.split("T")[0]
     else:
-        end_date_display = end_date
+        end_date_display = str(end_date) if end_date else ""
 
     category = ""
     tags = market.get("tags") or []
@@ -575,8 +577,12 @@ def run_claude_trader(executor, state: dict, session: requests.Session,
             )
 
             end_date = market.get("endDate") or market.get("end_date", "")
-            if end_date and "T" in end_date:
+            if hasattr(end_date, "strftime"):
+                end_date = end_date.strftime("%Y-%m-%d")
+            elif end_date and isinstance(end_date, str) and "T" in end_date:
                 end_date = end_date.split("T")[0]
+            else:
+                end_date = str(end_date) if end_date else ""
             slug = market.get("slug") or ""
             market_url = f"https://kalshi.com/markets/{slug}" if slug else ""
 
