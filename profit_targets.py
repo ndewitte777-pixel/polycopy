@@ -113,9 +113,11 @@ def status_line(state: dict) -> str:
     day = datetime.now(timezone.utc).weekday()
     day_type = "Weekend" if day >= 5 else "Weekday"
     big_target = target * TARGET_MULTIPLIER_FOR_PROTECTING
+    trades = state.get("daily_trades", 0)
+    at_risk = state.get("total_at_risk", 0.0)
     return (
-        f"[{phase}] {day_type} | Target: ${target:.2f} | Big target: ${big_target:.2f} | "
-        f"Net: ${net:+.2f} | Peak profit: ${peak:.2f} | "
+        f"[{phase}] {day_type} | Target: ${target:.2f} | Net: ${net:+.2f} | "
+        f"Trades: {trades}/10 | At risk: ${at_risk:.2f} | "
         f"Profit: ${state.get('daily_profit', 0):.2f} | Loss: ${state.get('daily_loss', 0):.2f}"
     )
 

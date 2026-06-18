@@ -70,6 +70,8 @@ def reset_daily_if_needed(state):
         state["daily_loss"] = 0.0
         state["daily_profit"] = 0.0
         state["peak_daily_profit"] = 0.0
+        state["daily_trades"] = 0
+        state["total_at_risk"] = 0.0
         log.info("Daily stats reset for %s", today)
 
 

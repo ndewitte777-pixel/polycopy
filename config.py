@@ -87,9 +87,14 @@ CONVICTION_SIZE_MULTIPLIER = 1.5  # multiply your_size by this on high convictio
 
 # ---- Position sizing ----
 COPY_SCALE_FACTOR = 1.0
-MAX_TRADE_USDC = 25
-MAX_DAILY_LOSS_USDC = 100
-MAX_OPEN_POSITIONS = 10
+MAX_TRADE_USDC = float(os.environ.get("MAX_TRADE_USDC", "3"))
+MAX_DAILY_LOSS_USDC = float(os.environ.get("MAX_DAILY_LOSS_USDC", "10"))
+MAX_OPEN_POSITIONS = int(os.environ.get("MAX_OPEN_POSITIONS", "5"))
+MAX_DAILY_TRADES = int(os.environ.get("MAX_DAILY_TRADES", "10"))
+
+# Cash reserve — always keep this % of bankroll uninvested
+# 50% means never have more than 50% of your balance in open positions
+CASH_RESERVE_PCT = float(os.environ.get("CASH_RESERVE_PCT", "0.50"))
 
 # ---- Kelly criterion ----
 # Use Kelly fraction for sizing instead of flat proportional copy.

@@ -40,6 +40,8 @@ from config import (
     MAX_TRADE_USDC,
     MAX_DAILY_LOSS_USDC,
     MAX_OPEN_POSITIONS,
+    MAX_DAILY_TRADES,
+    CASH_RESERVE_PCT,
     USE_KELLY,
     KELLY_FRACTION,
     USE_CLAUDE_FILTER,
@@ -374,7 +376,23 @@ def process_activity_item(data_api: DataAPI, executor: Executor, state: dict,
         return
 
     if state.get("open_positions", 0) >= MAX_OPEN_POSITIONS and side == "BUY":
-        log.warning("Max open positions reached. Skipping BUY.")
+        log.warning("Max open positions reached (%d). Skipping BUY.", MAX_OPEN_POSITIONS)
+        st.mark_seen(state, tx_hash)
+        return
+
+    # Daily trade count limit
+    daily_trades = state.get("daily_trades", 0)
+    if daily_trades >= MAX_DAILY_TRADES and side == "BUY":
+        log.info("Daily trade limit reached (%d/%d). Skipping.", daily_trades, MAX_DAILY_TRADES)
+        st.mark_seen(state, tx_hash)
+        return
+
+    # Cash reserve — never risk more than (1 - CASH_RESERVE_PCT) of bankroll
+    max_at_risk = your_bankroll * (1 - CASH_RESERVE_PCT)
+    current_at_risk = state.get("total_at_risk", 0.0)
+    if current_at_risk >= max_at_risk and side == "BUY":
+        log.info("Cash reserve limit: $%.2f at risk of $%.2f max. Skipping.",
+                 current_at_risk, max_at_risk)
         st.mark_seen(state, tx_hash)
         return
 
@@ -499,6 +517,8 @@ def process_activity_item(data_api: DataAPI, executor: Executor, state: dict,
             "timestamp": item.get("timestamp"), "response": resp,
         })
         state["open_positions"] = state.get("open_positions", 0) + 1
+        state["daily_trades"] = state.get("daily_trades", 0) + 1
+        state["total_at_risk"] = state.get("total_at_risk", 0.0) + your_size
         lots_for_token.append({
             "entry_price": price,
             "size_usdc": your_size,
