@@ -76,12 +76,21 @@ def get_balance() -> float:
         return 0.0
 
 
+_markets_cache: list = []
+_markets_cache_time: float = 0.0
+_MARKETS_CACHE_TTL = 180  # 3 minutes
+
+
 def get_markets(limit: int = 200, status: str = "open") -> list:
     """
-    Fetch open single-game markets using sport-specific series tickers.
-    Uses direct REST calls with auth headers since SDK doesn't support series_ticker.
-    Falls back to general endpoint if series fetch returns nothing useful.
+    Fetch open single-game markets. Results cached for 3 minutes.
     """
+    global _markets_cache, _markets_cache_time
+    import time as _t
+
+    # Return cached results if fresh
+    if _markets_cache and _t.time() - _markets_cache_time < _MARKETS_CACHE_TTL:
+        return _markets_cache
     import base64
     import time as _time
     import requests as _requests
@@ -199,8 +208,12 @@ def get_markets(limit: int = 200, status: str = "open") -> list:
         single_game = get_single_game_markets(all_markets)
         if single_game:
             log.info("Adding %d single-game markets extracted from parlay bundles", len(single_game))
+            _markets_cache = single_game
+            _markets_cache_time = _t.time()
             return single_game
 
+    _markets_cache = all_markets
+    _markets_cache_time = _t.time()
     return all_markets
 
 

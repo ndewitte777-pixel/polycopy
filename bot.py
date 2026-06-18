@@ -86,7 +86,86 @@ log = logging.getLogger("polycopy.bot")
 
 
 # ── Conviction tracker ──────────────────────────────────────────────────────
-# Maps token_id -> list of {wallet, timestamp, price}
+def _find_kalshi_market(market_info: dict, price: float,
+                         session: requests.Session) -> str | None:
+    """
+    Find a matching Kalshi market for a Polymarket copy signal.
+    Uses the market question and outcome keywords to match.
+    Returns a Kalshi ticker or None if no match found.
+    """
+    try:
+        from kalshi_data import get_markets, format_markets_for_claude
+
+        question = market_info.get("question", "").lower()
+        outcome = market_info.get("outcome", "").lower()
+        category = market_info.get("category", "").lower()
+        if not question:
+            return None
+
+        # Get all available Kalshi markets
+        all_raw = get_markets(limit=100)
+        short_term, long_term = format_markets_for_claude(all_raw)
+        all_markets = short_term + long_term
+
+        if not all_markets:
+            return None
+
+        best_ticker = None
+        best_score = 0.0
+
+        # Extract key words from the Polymarket question
+        # e.g. "Will England win on 2026-06-17?" → ["england", "win"]
+        import re
+        keywords = set(re.findall(r'\b[a-z]{3,}\b', question))
+        # Remove common filler words
+        stopwords = {"will", "the", "for", "and", "not", "yes", "over", "under",
+                     "2026", "win", "wins", "game", "match", "play", "score"}
+        keywords -= stopwords
+
+        for m in all_markets:
+            kalshi_q = (m.get("question", "") or m.get("title", "")).lower()
+            if not kalshi_q:
+                continue
+
+            # Keyword overlap score
+            kalshi_words = set(re.findall(r'\b[a-z]{3,}\b', kalshi_q))
+            overlap = len(keywords & kalshi_words)
+            score = overlap / max(len(keywords), 1)
+
+            # Price similarity bonus
+            kalshi_price = m.get("yes_price", 0.5)
+            if abs(kalshi_price - price) <= 0.08:
+                score += 0.15
+
+            # Category match bonus
+            ticker = m.get("ticker", "")
+            if "soccer" in category or "football" in category:
+                if any(kw in ticker for kw in ["WC", "SOC", "EPL"]):
+                    score += 0.1
+            elif "baseball" in category or "mlb" in category:
+                if "MLB" in ticker:
+                    score += 0.1
+            elif "basketball" in category or "nba" in category:
+                if "NBA" in ticker or "WNBA" in ticker:
+                    score += 0.1
+
+            if score > best_score:
+                best_score = score
+                best_ticker = ticker
+
+        if best_score >= 0.3 and best_ticker:
+            log.info("Copy match: score=%.2f ticker=%s", best_score, best_ticker)
+            return best_ticker
+
+        log.info("No Kalshi match found for: %s (best score=%.2f)", question[:60], best_score)
+        return None
+
+    except Exception as e:
+        log.warning("Kalshi market match failed: %s", e)
+        return None
+
+
+
 _conviction_log: dict = defaultdict(list)
 
 
@@ -397,7 +476,21 @@ def process_activity_item(data_api: DataAPI, executor: Executor, state: dict,
             st.mark_seen(state, tx_hash)
             return
 
-        resp = executor.place_order(token_id=token_id, side=side,
+        # For Kalshi, find matching market using the market question
+        import os as _os
+        if _os.environ.get("EXCHANGE", "kalshi").lower() == "kalshi":
+            kalshi_ticker = _find_kalshi_market(market_info, price, session)
+            if not kalshi_ticker:
+                log.info("COPY SKIP | No matching Kalshi market found for: %s",
+                         market_info.get("question", "?")[:60])
+                st.mark_seen(state, tx_hash)
+                return
+            trade_token_id = kalshi_ticker
+            log.info("COPY MATCH | Polymarket → Kalshi: %s", kalshi_ticker)
+        else:
+            trade_token_id = token_id
+
+        resp = executor.place_order(token_id=trade_token_id, side=side,
                                     price=price, size_usdc=your_size)
         st.record_trade(state, {
             "tx_hash": tx_hash, "wallet": wallet, "side": side,
@@ -516,11 +609,15 @@ def run():
     your_bankroll = executor.get_balance()
     log.info("Starting bankroll: $%.2f USDC", your_bankroll)
 
-    # Clean up stale Polymarket token IDs (very long numeric strings)
+    # Clean up stale lots — remove Polymarket token IDs (long numbers)
+    # and any tickers that aren't valid Kalshi format (starting with KX)
     open_lots = state.setdefault("open_lots", {})
-    stale = [k for k in list(open_lots.keys()) if k.isdigit() and len(k) > 20]
+    stale = [k for k in list(open_lots.keys())
+             if (k.isdigit() and len(k) > 20)  # Polymarket numeric token
+             or (not k.startswith("KX") and not k.startswith("kx")  # not a Kalshi ticker
+                 and len(k) > 10)]  # and long enough to be a token ID
     if stale:
-        log.info("Clearing %d stale Polymarket lots from state", len(stale))
+        log.info("Clearing %d stale non-Kalshi lots from state", len(stale))
         for k in stale:
             del open_lots[k]
         state["open_positions"] = len(open_lots)
