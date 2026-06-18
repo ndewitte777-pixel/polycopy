@@ -238,14 +238,13 @@ def ask_claude_live(game: dict, kalshi_markets: list) -> dict | None:
 
     prompt = build_game_prompt(game, kalshi_markets)
 
+    from claude_rate_limiter import can_call_claude, mark_claude_called
+    if not can_call_claude():
+        return None
+
     for attempt in range(2):
         try:
-            # Check global rate limit before calling Claude
-        from claude_rate_limiter import can_call_claude, mark_claude_called
-        if not can_call_claude():
-            return None
-
-        resp = requests.post(
+            resp = requests.post(
                 ANTHROPIC_URL,
                 headers={
                     "x-api-key": ANTHROPIC_API_KEY,
