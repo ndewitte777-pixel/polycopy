@@ -123,16 +123,47 @@ def get_markets(limit: int = 200, status: str = "open") -> list:
             log.warning("Auth header error: %s", e)
             return {}
 
-    # Sport series tickers for single-game markets
+    # Kalshi series tickers for single-game markets
+    # Game-level series (not season/championship futures)
     SERIES_TICKERS = [
-        "KXNBA", "KXMLB", "KXNFL", "KXNHL",
-        "KXSOCWC", "KXSOCEPL", "KXSOCUCL",
-        "KXUFC", "KXWNBA", "KXNCAAB", "KXNCAAF",
+        "KXMLBGAME",    # MLB individual games
+        "KXNBAGAME",    # NBA individual games
+        "KXNFLGAME",    # NFL individual games
+        "KXNHLGAME",    # NHL individual games
+        "KXSOCGAME",    # Soccer individual games
+        "KXWCGAME",     # World Cup games
+        "KXUFCGAME",    # UFC individual fights
+        "KXWNBAGAME",   # WNBA individual games
+        "KXNCAAFGAME",  # College football games
+        "KXNCAABGAME",  # College basketball games
+        # Also try without GAME suffix in case some use shorter tickers
+        "KXMLB-GAME",
+        "KXNBA-GAME",
     ]
 
     all_markets = []
     seen_tickers = set()
     session = _requests.Session()
+
+    # First try to discover available series from the API
+    try:
+        path = "/trade-api/v2/series"
+        headers = _make_headers(path)
+        r = session.get(base_url + path, headers=headers, timeout=10)
+        if r.status_code == 200:
+            series_data = r.json().get("series", [])
+            discovered = []
+            for s in series_data:
+                ticker = s.get("ticker", "")
+                # Look for game-level series (not season/championship futures)
+                if ticker and any(w in ticker.upper() for w in
+                                  ["GAME", "MATCH", "FIGHT", "BOUT"]):
+                    discovered.append(ticker)
+            if discovered:
+                log.info("Discovered %d game series: %s", len(discovered), discovered[:5])
+                SERIES_TICKERS = discovered + SERIES_TICKERS
+    except Exception as e:
+        log.debug("Series discovery failed: %s", e)
 
     for series in SERIES_TICKERS:
         try:
