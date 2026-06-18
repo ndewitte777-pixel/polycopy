@@ -292,7 +292,7 @@ def get_single_game_markets(parlay_markets: list) -> list:
     base_url = KALSHI_DEMO_URL if KALSHI_USE_DEMO else KALSHI_LIVE_URL
     ELECTIONS_BASE = "https://api.elections.kalshi.com/trade-api/v2"
 
-    TRADING_BASE = "https://trading-api.kalshi.com/trade-api/v2"
+    TRADING_BASE = "https://api.elections.kalshi.com/trade-api/v2"
 
     def _make_headers(method: str, path: str, query_string: str = "") -> dict:
         """Build Kalshi auth headers. Path must include query string for GET requests."""
@@ -343,12 +343,35 @@ def get_single_game_markets(parlay_markets: list) -> list:
 
     log.info("Unique series: %s", sorted(series_map.keys()))
 
+    # Use the authenticated SDK to fetch markets for each series
+    # This avoids auth header issues with manual REST calls
+    api = _get_api()
+    if not api:
+        log.warning("No Kalshi API available for single game market fetch")
+        return []
+
     session = _rq.Session()
     all_markets = []
     seen = set()
 
     for series, sample_event in list(series_map.items())[:20]:
         try:
+            # Try SDK first
+            try:
+                resp = api.get_markets(event_ticker=sample_event, status="open", limit=20)
+                if hasattr(resp, "markets") and resp.markets:
+                    mkts = [m.to_dict() if hasattr(m, "to_dict") else m for m in resp.markets]
+                    for m in mkts:
+                        ticker = m.get("ticker", "")
+                        if ticker and ticker not in seen:
+                            seen.add(ticker)
+                            all_markets.append(m)
+                    log.info("  Got %d markets for %s via SDK", len(mkts), series)
+                    continue
+            except Exception as e:
+                log.debug("SDK fetch failed for %s: %s", series, e)
+
+            # Fall back to REST with correct auth
             path = "/trade-api/v2/markets"
             qs = f"event_ticker={sample_event}&status=open&limit=20"
             headers = _make_headers("GET", path, qs)
@@ -368,10 +391,11 @@ def get_single_game_markets(parlay_markets: list) -> list:
                         if ticker and ticker not in seen:
                             seen.add(ticker)
                             all_markets.append(m)
-                    log.info("  Got %d markets for %s", len(mkts), series)
+                    log.info("  Got %d markets for %s via REST", len(mkts), series)
             elif r.status_code == 401:
-                log.warning("Auth failed for event fetch — %s", r.text[:200])
-                break  # No point trying more if auth is broken
+                log.warning("Auth failed for %s: %s", sample_event, r.text[:100])
+            elif r.status_code == 404:
+                log.debug("Event %s not found (404)", sample_event)
         except Exception as e:
             log.debug("Event %s failed: %s", sample_event, e)
             continue
