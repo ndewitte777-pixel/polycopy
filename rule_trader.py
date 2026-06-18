@@ -382,14 +382,14 @@ def _extract_single_legs(market: dict) -> list[dict]:
 
             if question:
                 legs.append({
-                    "ticker": ticker,  # use parent ticker for ordering
+                    "ticker": ticker,
                     "question": question,
                     "yes_price": market.get("yes_price", 0.5),
                     "_hours_left": market.get("_hours_left", 24),
                     "_days_left": market.get("_days_left", 1),
-                    "_source": "kalshi",
+                    "_source": "kalshi_parlay_leg",  # NOT a real orderable market
                     "_leg_side": side,
-                    "_is_leg": True,
+                    "_is_leg": True,  # Cannot place individual orders on this
                     "endDate": str(close_time) if close_time else "",
                     "liquidity": float(market.get("open_interest") or 0),
                 })
@@ -481,15 +481,26 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
         if not ticker:
             continue
 
-        # Skip if matched to a parlay ticker
-        if any(kw in ticker.upper() for kw in ["MULTIGAME", "EXTENDED", "CROSSCATEGORY", "KXMVE"]):
+        # Skip if this is a parlay ticker or extracted leg from a parlay
+        parlay_keywords = ["MULTIGAME", "EXTENDED", "CROSSCATEGORY", "KXMVE"]
+        if any(kw in ticker.upper() for kw in parlay_keywords):
             log.info("Rule trader: skipping parlay ticker %s for %s", ticker[:30], game_id)
             continue
 
-        # Skip if no real market question (placeholder)
+        # Skip if this is an extracted leg (has _is_leg flag) - can't order individually
+        if target_market.get("_is_leg"):
+            log.info("Rule trader: skipping parlay leg for %s — no single-game market found", game_id)
+            continue
+
+        # Skip if no real market question
         question = target_market.get("question", target_market.get("title", ""))
         if not question or question == "?":
-            log.info("Rule trader: no real market question found for %s", game_id)
+            log.info("Rule trader: no real market question for %s", game_id)
+            continue
+
+        # Skip if source is not kalshi single-game market
+        if target_market.get("_source") != "kalshi":
+            log.info("Rule trader: market not from Kalshi for %s", game_id)
             continue
 
         market_price = target_market.get("yes_price", 0.5)
