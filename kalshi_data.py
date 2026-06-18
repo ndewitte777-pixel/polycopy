@@ -123,93 +123,10 @@ def get_markets(limit: int = 200, status: str = "open") -> list:
             log.warning("Auth header error: %s", e)
             return {}
 
-    # Kalshi series tickers for single-game markets
-    # Game-level series (not season/championship futures)
-    SERIES_TICKERS = [
-        "KXMLBGAME",    # MLB individual games
-        "KXNBAGAME",    # NBA individual games
-        "KXNFLGAME",    # NFL individual games
-        "KXNHLGAME",    # NHL individual games
-        "KXSOCGAME",    # Soccer individual games
-        "KXWCGAME",     # World Cup games
-        "KXUFCGAME",    # UFC individual fights
-        "KXWNBAGAME",   # WNBA individual games
-        "KXNCAAFGAME",  # College football games
-        "KXNCAABGAME",  # College basketball games
-        # Also try without GAME suffix in case some use shorter tickers
-        "KXMLB-GAME",
-        "KXNBA-GAME",
-    ]
-
-    all_markets = []
-    seen_tickers = set()
-    session = _requests.Session()
-
-    # First try to discover available series from the API
-    try:
-        path = "/trade-api/v2/series"
-        headers = _make_headers(path)
-        r = session.get(base_url + path, headers=headers, timeout=10)
-        if r.status_code == 200:
-            series_data = r.json().get("series", [])
-            discovered = []
-            for s in series_data:
-                ticker = s.get("ticker", "")
-                # Look for game-level series (not season/championship futures)
-                if ticker and any(w in ticker.upper() for w in
-                                  ["GAME", "MATCH", "FIGHT", "BOUT"]):
-                    discovered.append(ticker)
-            if discovered:
-                log.info("Discovered %d game series: %s", len(discovered), discovered[:5])
-                SERIES_TICKERS = discovered + SERIES_TICKERS
-    except Exception as e:
-        log.debug("Series discovery failed: %s", e)
-
-    for series in SERIES_TICKERS:
-        for endpoint in ["/trade-api/v2/events", "/trade-api/v2/markets"]:
-            try:
-                headers = _make_headers(endpoint)
-                r = session.get(
-                    base_url + endpoint,
-                    params={"series_ticker": series, "status": status, "limit": 50},
-                    headers=headers,
-                    timeout=10,
-                )
-                log.info("Series %s @ %s → %d", series, endpoint, r.status_code)
-                if r.status_code == 200:
-                    data = r.json()
-                    # Events endpoint wraps markets inside event objects
-                    events = data.get("events", [])
-                    if events:
-                        for event in events:
-                            for m in event.get("markets", []):
-                                ticker = m.get("ticker", "")
-                                if ticker and ticker not in seen_tickers:
-                                    seen_tickers.add(ticker)
-                                    all_markets.append(m)
-                        break
-                    # Markets endpoint
-                    markets = data.get("markets", [])
-                    for m in markets:
-                        ticker = m.get("ticker", "")
-                        if ticker and ticker not in seen_tickers:
-                            seen_tickers.add(ticker)
-                            all_markets.append(m)
-                    if markets:
-                        break
-                elif r.status_code == 404:
-                    break  # Series doesn't exist
-                elif r.status_code == 401:
-                    log.warning("Auth failed for series %s", series)
-                    break
-            except Exception as e:
-                log.debug("Series %s @ %s failed: %s", series, endpoint, e)
-                continue
-
-    if all_markets:
-        log.info("Fetched %d single-game markets via series tickers", len(all_markets))
-        log.info("Sample: %s", str(all_markets[0])[:200])
-        return all_markets
+    # Kalshi series ticker endpoint returns 404 for all sports tickers.
+    # Their sports API only exposes parlay picks, not single-game markets.
+    # We use the general endpoint and filter out parlays to get non-sports markets
+    # (politics, crypto, economics) which are single-question YES/NO contracts.
 
     log.info("Series tickers returned 0 markets — Kalshi may only offer parlay picks right now")
     api = _get_api()
@@ -292,30 +209,23 @@ def place_order(ticker: str, side: str, count: int, price_cents: int) -> dict:
         return {"error": str(e)}
 
 
-def _is_parlay(market: dict) -> bool:
-    """Returns True if this is a multi-game or cross-category parlay — skip it."""
+def _is_sports_parlay(market: dict) -> bool:
+    """Returns True if this is a multi-leg sports parlay — skip it."""
     ticker = market.get("ticker", "").upper()
     title = market.get("title", "")
     event_ticker = market.get("event_ticker", "").upper()
 
-    # Known Kalshi parlay ticker patterns
-    parlay_keywords = ["MULTIGAME", "EXTENDED", "CROSSCATEGORY", "CROSS_CATEGORY",
-                       "MULTI", "COMBO", "PARLAY", "BUNDLE"]
-    for kw in parlay_keywords:
+    # Known Kalshi sports parlay ticker patterns
+    sports_parlay_keywords = [
+        "MULTIGAME", "EXTENDED", "CROSSCATEGORY",
+        "CROSS_CATEGORY", "KXMVE",
+    ]
+    for kw in sports_parlay_keywords:
         if kw in ticker or kw in event_ticker:
             return True
 
-    # Title with 3+ comma-separated outcomes = multi-leg bet
+    # Title with 2+ comma-separated outcomes = multi-leg bet
     if title and title.count(",") >= 2:
-        return True
-
-    # Title mixing multiple team names or over/under in same line
-    title_lower = title.lower()
-    mixed_indicators = ["over", "under", "points scored", "runs scored", "goals scored"]
-    sports_indicators = ["yes ", "no "]
-    has_mixed = any(w in title_lower for w in mixed_indicators)
-    has_multiple_sides = title_lower.count("yes ") + title_lower.count("no ") > 1
-    if has_mixed and has_multiple_sides:
         return True
 
     return False
@@ -334,7 +244,7 @@ def format_markets_for_claude(markets: list) -> tuple[list, list]:
     for m in markets:
         if not isinstance(m, dict):
             continue
-        if _is_parlay(m):
+        if _is_sports_parlay(m):
             skipped_parlay += 1
             continue
 
