@@ -242,21 +242,25 @@ def place_order(ticker: str, side: str, count: int, price_cents: int) -> dict:
 
 
 def _is_sports_parlay(market: dict) -> bool:
-    """Returns True if this is a multi-leg sports parlay — skip it."""
+    """Returns True if this is a multi-leg bundle — skip it."""
     ticker = market.get("ticker", "").upper()
     title = market.get("title", "")
     event_ticker = market.get("event_ticker", "").upper()
 
-    # Known Kalshi sports parlay ticker patterns
-    sports_parlay_keywords = [
-        "MULTIGAME", "EXTENDED", "CROSSCATEGORY",
-        "CROSS_CATEGORY", "KXMVE",
-    ]
+    # Sports parlay ticker patterns
+    sports_parlay_keywords = ["MULTIGAME", "EXTENDED", "CROSSCATEGORY", "KXMVE"]
     for kw in sports_parlay_keywords:
         if kw in ticker or kw in event_ticker:
             return True
 
-    # Title with 2+ comma-separated outcomes = multi-leg bet
+    # Custom strike with multiple associated markets = multi-leg bundle
+    custom_strike = market.get("custom_strike", {})
+    if isinstance(custom_strike, dict):
+        assoc = custom_strike.get("Associated Markets", "") or custom_strike.get("Associated Events", "")
+        if assoc and "," in str(assoc):
+            return True
+
+    # Title with 2+ comma-separated outcomes = multi-leg
     if title and title.count(",") >= 2:
         return True
 
@@ -282,8 +286,11 @@ def format_markets_for_claude(markets: list) -> tuple[list, list]:
 
         close_time = m.get("close_time") or m.get("expiration_time")
         ticker = m.get("ticker", "")
-        title = m.get("title") or ticker
-        category = m.get("event_ticker", "").split("-")[0] if m.get("event_ticker") else ""
+        # Elections API uses different title fields
+        title = (m.get("title") or m.get("subtitle") or
+                 m.get("question") or ticker)
+        category = (m.get("category") or
+                   m.get("event_ticker", "").split("-")[0] if m.get("event_ticker") else "")
 
         if m.get("status") not in ("active", "open", None, ""):
             continue
@@ -295,10 +302,12 @@ def format_markets_for_claude(markets: list) -> tuple[list, list]:
                 end = close_time
                 if end.tzinfo is None:
                     end = end.replace(tzinfo=timezone.utc)
+            elif isinstance(close_time, str):
+                end = datetime.fromisoformat(close_time.replace("Z", "+00:00"))
             elif isinstance(close_time, (int, float)):
                 end = datetime.fromtimestamp(float(close_time), tz=timezone.utc)
             else:
-                end = datetime.fromisoformat(str(close_time).replace("Z", "+00:00"))
+                continue
 
             hours_left = (end - now).total_seconds() / 3600
             days_left = hours_left / 24
@@ -341,4 +350,8 @@ def format_markets_for_claude(markets: list) -> tuple[list, list]:
         "Kalshi markets: %d total (%d parlays filtered) → %d same/next-day, %d longer-term",
         len(markets), skipped_parlay, len(short_term), len(long_term),
     )
+    if short_term:
+        log.info("First short-term market: %s", short_term[0].get("question", short_term[0].get("ticker")))
+    if long_term:
+        log.info("First long-term market: %s", long_term[0].get("question", long_term[0].get("ticker")))
     return short_term, long_term
