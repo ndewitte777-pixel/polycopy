@@ -24,10 +24,16 @@ from config import (
 
 log = logging.getLogger("polycopy.scalper")
 
-SCALP_MIN_CENTS     = 0.05   # minimum price gain before considering exit
-SCALP_PROFIT_PCT    = 15.0   # % gain that triggers the ride/scalp decision
-SCALP_MAX_HOLD_MINS = 90     # hard force-exit after this long regardless
-HARD_STOP_PCT       = -40.0  # always cut losses at this level
+SCALP_MIN_CENTS     = 0.15   # fallback minimum cents move
+SCALP_PROFIT_PCT    = 25.0   # % gain on price that triggers ride/scalp decision
+SCALP_MAX_HOLD_MINS = 120    # hard force-exit after this long
+HARD_STOP_PCT       = -30.0  # stop loss at -30%
+
+# Target profit as % of the original bet size (not price move %)
+# e.g. $1 bet → exit consideration at $0.25 profit (25%)
+# e.g. $2 bet → exit consideration at $0.50 profit (25%)
+SCALP_TARGET_RETURN_PCT = 25.0  # 25% return on bet size
+MIN_PROFIT_DOLLARS  = 0.20      # never exit for less than this regardless
 
 RIDE_SYSTEM_PROMPT = """You are an expert live sports prediction market trader.
 
@@ -154,39 +160,65 @@ def should_exit(lot: dict, current_price: float, game_context: str) -> tuple[boo
 
     price_change = current_price - entry_price
     pct_change = (price_change / entry_price) * 100
+    size_usdc = lot.get("size_usdc", 1.0)
+
+    # Actual dollar profit: (price move) × (contracts held)
+    # contracts = size_usdc / entry_price
+    contracts = size_usdc / entry_price if entry_price > 0 else 1
+    dollar_profit = price_change * contracts
+
+    # 25% return target on original bet size
+    # $1 bet → need $0.25 profit; $2 bet → need $0.50 profit
+    profit_target = size_usdc * (SCALP_TARGET_RETURN_PCT / 100)
 
     # 1. Hard stop loss
     if pct_change <= HARD_STOP_PCT:
-        return True, f"Hard stop loss: {pct_change:.1f}% from entry"
+        return True, f"Hard stop loss: {pct_change:.1f}% | ${dollar_profit:.2f}"
 
-    # 2. Force exit after max hold time while profitable
+    # 2. Near resolution (>0.88) — just hold for full payout
+    if current_price >= 0.88:
+        return False, "Near resolution — holding to collect full payout"
+
+    # 3. Force exit after max hold time while profitable
     opened_at = lot.get("opened_at", time.time())
     mins_held = (time.time() - opened_at) / 60
-    if mins_held > SCALP_MAX_HOLD_MINS and pct_change > 0:
-        return True, f"Max hold time ({SCALP_MAX_HOLD_MINS}min) — locking in profit"
+    if mins_held > SCALP_MAX_HOLD_MINS and dollar_profit > 0:
+        return True, f"Max hold ({SCALP_MAX_HOLD_MINS}min) | ${dollar_profit:.2f} profit"
 
-    # 3. Already riding — check if hit target
+    # 4. Already riding — check if hit ride target
     ride_target = lot.get("ride_target_price")
     if ride_target and lot.get("riding"):
         if current_price >= ride_target:
-            return True, f"🏇 Ride target hit: {current_price:.3f} >= {ride_target:.3f}"
-        return False, ""  # still riding, wait for target
+            return True, f"🏇 Ride target hit: {current_price:.3f} | ${dollar_profit:.2f}"
+        return False, ""
 
-    # 4. Price moved enough to decide — ask Claude
-    if price_change >= SCALP_MIN_CENTS or pct_change >= SCALP_PROFIT_PCT:
+    # 5. Haven't hit 25% return yet — don't exit
+    if dollar_profit < profit_target:
+        return False, ""
+
+    # 6. Hit 25% return — ask Claude: scalp now or ride for more?
+    if dollar_profit >= profit_target:
         decision = ask_claude_ride_or_scalp(lot, current_price, game_context)
 
         if decision["decision"] == "RIDE" and decision["confidence"] >= 60:
             lot["riding"] = True
-            lot["ride_target_price"] = decision.get("ride_target_price", current_price * 1.15)
+            lot["ride_target_price"] = decision.get("ride_target_price",
+                                                     current_price * 1.20)
             lot["ride_reason"] = decision["reason"]
             log.info(
-                "RIDING position | target=%.3f | %s",
-                lot["ride_target_price"], decision["reason"],
+                "RIDING | target=%.3f | return=%.0f%% ($%.2f/$%.2f) | %s",
+                lot["ride_target_price"],
+                (dollar_profit / size_usdc) * 100,
+                dollar_profit,
+                size_usdc,
+                decision["reason"],
             )
             return False, ""
         else:
-            return True, f"Claude says SCALP | {decision['reason']}"
+            return True, (
+                f"Taking {(dollar_profit/size_usdc)*100:.0f}% return "
+                f"(${dollar_profit:.2f} on ${size_usdc:.2f}) | {decision['reason']}"
+            )
 
     return False, ""
 
@@ -217,8 +249,15 @@ def run_scalper(open_lots: dict, executor, state: dict,
 
         remaining_lots = []
         for lot in lots:
+            source = lot.get("source", "")
+            entry_price = lot.get("entry_price", 0)
             market_info = lot.get("market_info", {})
             question = market_info.get("question", "")
+            if not entry_price:
+                remaining_lots.append(lot)
+                continue
+
+            pct_change = (current_price - entry_price) / entry_price * 100
 
             # Match live game context
             game_context = ""
@@ -231,7 +270,18 @@ def run_scalper(open_lots: dict, executor, state: dict,
                     if score >= 0.4:
                         game_context = format_game_context(game)
 
-            sell, reason = should_exit(lot, current_price, game_context)
+            # Exit logic — copy trades use simple stop/take-profit
+            if source in ("kalshi_copy", "copy"):
+                if pct_change >= 40:
+                    sell, reason = True, f"Take profit: +{pct_change:.1f}%"
+                elif pct_change <= -30:
+                    sell, reason = True, f"Stop loss: {pct_change:.1f}%"
+                elif (time.time() - lot.get("opened_at", time.time())) > 7200 and abs(pct_change) < 5:
+                    sell, reason = True, "Time stop: 2hrs held, no movement"
+                else:
+                    sell, reason = should_exit(lot, current_price, game_context)
+            else:
+                sell, reason = should_exit(lot, current_price, game_context)
 
             if sell:
                 entry_price = lot["entry_price"]
