@@ -362,6 +362,12 @@ def process_activity_item(data_api: DataAPI, executor: Executor, state: dict,
         st.mark_seen(state, tx_hash)
         return
 
+    # Skip stale Polymarket numeric token IDs — they don't exist on Kalshi
+    if token_id.isdigit() and len(token_id) > 20:
+        log.debug("Skipping stale Polymarket token: %s", token_id[:20])
+        st.mark_seen(state, tx_hash)
+        return
+
     # --- Price slip filter ---
     if side == "BUY":
         try:
@@ -830,16 +836,26 @@ def run():
                         log.info("Rule trader: %d new positions opened", rule_entries)
 
                 # Kalshi-native copy trading — watch smart money on Kalshi directly
-                kc_opened = kc.run_kalshi_copy(
-                    all_markets=short_term + long_term,
-                    executor=executor,
-                    state=state,
-                    session=session,
-                    notifier=notifier,
-                    claude_filter_fn=cf.evaluate_trade if USE_CLAUDE_FILTER else None,
-                )
-                if kc_opened:
-                    log.info("Kalshi copy: %d new positions", kc_opened)
+                # Reuse markets already fetched above, or fetch fresh if needed
+                try:
+                    kc_markets = short_t + long_t if 'short_t' in dir() else []
+                    if not kc_markets:
+                        from kalshi_data import get_markets, format_markets_for_claude
+                        _kc_raw = get_markets(limit=100)
+                        _kc_s, _kc_l = format_markets_for_claude(_kc_raw)
+                        kc_markets = _kc_s + _kc_l
+                    kc_opened = kc.run_kalshi_copy(
+                        all_markets=kc_markets,
+                        executor=executor,
+                        state=state,
+                        session=session,
+                        notifier=notifier,
+                        claude_filter_fn=cf.evaluate_trade if USE_CLAUDE_FILTER else None,
+                    )
+                    if kc_opened:
+                        log.info("Kalshi copy: %d new positions", kc_opened)
+                except Exception as _kc_err:
+                    log.debug("Kalshi copy error: %s", _kc_err)
 
                 # Check and cancel timed-out resting orders
                 from kalshi_data import _get_api
