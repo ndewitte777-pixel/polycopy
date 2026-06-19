@@ -28,6 +28,65 @@ SPORT_ENDPOINTS = {
     "nhl": f"{ESPN_BASE}/hockey/nhl/scoreboard",
 }
 
+PGA_LEADERBOARD_URL = f"{ESPN_BASE}/golf/pga/leaderboard"
+
+
+def fetch_pga_leaderboard(session: requests.Session = None) -> dict:
+    """
+    Fetch current PGA Tour leaderboard.
+    Returns dict with tournament info and top players.
+    """
+    if session is None:
+        session = requests.Session()
+    try:
+        r = session.get(
+            PGA_LEADERBOARD_URL,
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=10,
+        )
+        r.raise_for_status()
+        data = r.json()
+
+        tournaments = data.get("events", [])
+        if not tournaments:
+            return {}
+
+        event = tournaments[0]
+        event_name = event.get("name", "PGA Tournament")
+        status = event.get("status", {})
+        in_progress = status.get("type", {}).get("state", "") in ("in", "pre")
+        round_num = status.get("period", 0)
+
+        competitors = event.get("competitors", [])
+        players = []
+        for c in competitors[:20]:  # top 20 only
+            athlete = c.get("athlete", {})
+            stats = c.get("statistics", [])
+            score_stat = next((s for s in stats if s.get("name") == "score"), {})
+            pos = c.get("status", {}).get("position", {}).get("displayName", "?")
+            score = score_stat.get("displayValue", "E")
+            players.append({
+                "name": athlete.get("displayName", "?"),
+                "last_name": athlete.get("lastName", "?"),
+                "position": pos,
+                "score": score,
+                "thru": c.get("status", {}).get("thru", ""),
+            })
+
+        return {
+            "sport": "pga",
+            "tournament": event_name,
+            "round": round_num,
+            "in_progress": in_progress,
+            "players": players,
+            "is_live": in_progress,
+            "raw_name": event_name,
+            "short_name": event_name,
+        }
+    except Exception as e:
+        log.debug("PGA leaderboard fetch failed: %s", e)
+        return {}
+
 
 def fetch_live_games(sport: str = "soccer", session: requests.Session = None) -> list:
     """
@@ -126,7 +185,7 @@ def parse_espn_event(event: dict, sport: str) -> dict | None:
 
 
 def fetch_all_live_games(session: requests.Session = None) -> list:
-    """Fetch live games across all supported sports."""
+    """Fetch live games across all supported sports including PGA."""
     all_games = []
     sports = ["world_cup", "soccer", "nba", "nfl", "mlb", "nhl"]
     for sport in sports:
@@ -135,6 +194,14 @@ def fetch_all_live_games(session: requests.Session = None) -> list:
         if live:
             log.info("Found %d live %s games", len(live), sport)
             all_games.extend(live)
+
+    # PGA Tour leaderboard
+    pga = fetch_pga_leaderboard(session)
+    if pga and pga.get("in_progress") and pga.get("players"):
+        log.info("PGA Tour in progress: %s (Round %s)",
+                 pga.get("tournament", "?"), pga.get("round", "?"))
+        all_games.append(pga)
+
     return all_games
 
 

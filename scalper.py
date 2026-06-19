@@ -204,6 +204,13 @@ def run_scalper(open_lots: dict, executor, state: dict,
         if not lots:
             continue
 
+        # Skip and remove stale Polymarket token IDs
+        if (token_id.isdigit() and len(token_id) > 20) or \
+           (not token_id.upper().startswith("KX") and len(token_id) > 15):
+            log.info("Removing stale lot: %s", token_id[:20])
+            open_lots.pop(token_id, None)
+            continue
+
         current_price = get_current_price(token_id, session)
         if current_price <= 0:
             continue
@@ -249,6 +256,17 @@ def run_scalper(open_lots: dict, executor, state: dict,
 
                 import state as _st
                 _st.record_pnl(state, pnl_usdc)
+
+                # Record outcome in journal and wallet tracker
+                import journal as _jnl
+                import wallet_tracker as _wt
+                _jnl.record_outcome(state, token_id, pnl_usdc, current_price)
+                _wt.record_trade_outcome(state, token_id, pnl_usdc)
+
+                # Reduce at-risk tracking
+                state["total_at_risk"] = max(
+                    0, state.get("total_at_risk", 0) - lot.get("size_usdc", 0)
+                )
 
                 result = "WIN" if pnl_usdc > 0 else "LOSS"
                 emoji = "✅" if pnl_usdc > 0 else "❌"

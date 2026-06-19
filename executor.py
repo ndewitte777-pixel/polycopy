@@ -136,29 +136,138 @@ class Executor:
 
     def _place_kalshi_order(self, ticker: str, side: str, price: float,
                              size_usdc: float) -> dict:
-        import uuid
-        # Convert price (0-1 float) to cents (1-99 int)
-        price_cents = max(1, min(99, int(price * 100)))
-        # Count = number of $1 contracts
-        count = max(1, int(size_usdc / price)) if price > 0 else 1
+        import uuid, base64, time as _time, requests as _rq
+        from config import KALSHI_API_KEY_ID, KALSHI_PRIVATE_KEY, KALSHI_USE_DEMO
+
         kalshi_side = "yes" if side.upper() in ("BUY", "YES") else "no"
 
+        # Fetch real current market price
         try:
-            resp = self.client.create_order(
+            from kalshi_data import get_market_price
+            yes_price, no_price = get_market_price(ticker)
+            real_price = yes_price if kalshi_side == "yes" else no_price
+            if 0.01 < real_price < 0.99:
+                log.info("Using real market price %.2f (was %.2f)", real_price, price)
+                price = real_price
+        except Exception as e:
+            log.debug("Could not fetch real price for %s: %s", ticker, e)
+
+        # Skip extreme odds
+        if price < 0.05 or price > 0.95:
+            log.info("Skipping extreme odds %.2f for %s", price, ticker)
+            return {"skipped": True, "reason": f"extreme_odds_{price:.2f}"}
+
+        # Count = number of contracts
+        count = max(1, int(size_usdc / price)) if price > 0 else 1
+
+        # V2 API uses bid/ask sides (from YES perspective)
+        # bid = buy YES, ask = sell YES (= buy NO)
+        v2_side = "bid" if kalshi_side == "yes" else "ask"
+        # V2 price is in dollars as a string (e.g. "0.5600")
+        v2_price = f"{price:.4f}"
+
+        # Build auth headers for POST
+        try:
+            from cryptography.hazmat.primitives.serialization import load_pem_private_key
+            from cryptography.hazmat.primitives import hashes
+            from cryptography.hazmat.primitives.asymmetric import padding as _pad
+
+            pem = KALSHI_PRIVATE_KEY.strip()
+            if not pem.startswith("-----"):
+                pem = f"-----BEGIN PRIVATE KEY-----\n{pem}\n-----END PRIVATE KEY-----"
+            elif "\\n" in pem:
+                pem = pem.replace("\\n", "\n")
+            key = load_pem_private_key(pem.encode(), password=None)
+            ts = str(int(_time.time() * 1000))
+            sign_path = "/trade-api/v2/portfolio/events/orders"
+            sig = key.sign(
+                (ts + "POST" + sign_path).encode(),
+                _pad.PSS(mgf=_pad.MGF1(hashes.SHA256()),
+                         salt_length=_pad.PSS.MAX_LENGTH),
+                hashes.SHA256(),
+            )
+            headers = {
+                "KALSHI-ACCESS-KEY": KALSHI_API_KEY_ID,
+                "KALSHI-ACCESS-TIMESTAMP": ts,
+                "KALSHI-ACCESS-SIGNATURE": base64.b64encode(sig).decode(),
+                "Content-Type": "application/json",
+            }
+        except Exception as e:
+            log.error("Auth header build failed: %s — falling back to SDK", e)
+            return self._place_kalshi_order_sdk(ticker, side, price, size_usdc)
+
+        base = "https://api.elections.kalshi.com/trade-api/v2"
+        payload = {
+            "ticker": ticker,
+            "client_order_id": str(uuid.uuid4()),
+            "side": v2_side,
+            "count": str(count),
+            "price": v2_price,
+            "time_in_force": "immediate_or_cancel",  # fills instantly, no resting
+            "self_trade_prevention_type": "taker_at_cross",
+        }
+
+        try:
+            r = _rq.post(
+                f"{base}/portfolio/events/orders",
+                headers=headers,
+                json=payload,
+                timeout=10,
+            )
+            if r.status_code in (200, 201):
+                data = r.json()
+                fill_count = data.get("fill_count", "0")
+                remaining = data.get("remaining_count", "0")
+                avg_price = data.get("average_fill_price", v2_price)
+                log.info(
+                    "V2 IOC order: filled=%s remaining=%s avg_price=%s ticker=%s",
+                    fill_count, remaining, avg_price, ticker,
+                )
+                status = "executed" if float(fill_count or 0) > 0 else "cancelled"
+                return {
+                    "order": {
+                        "order_id": data.get("order_id", ""),
+                        "ticker": ticker,
+                        "side": kalshi_side,
+                        "status": status,
+                        "fill_count": fill_count,
+                        "remaining_count": remaining,
+                        "average_fill_price": avg_price,
+                    }
+                }
+            else:
+                log.warning("V2 order failed %d: %s — falling back to SDK",
+                            r.status_code, r.text[:200])
+                return self._place_kalshi_order_sdk(ticker, side, price, size_usdc)
+        except Exception as e:
+            log.error("V2 order exception: %s — falling back to SDK", e)
+            return self._place_kalshi_order_sdk(ticker, side, price, size_usdc)
+
+    def _place_kalshi_order_sdk(self, ticker: str, side: str, price: float,
+                                 size_usdc: float) -> dict:
+        """SDK fallback — limit order (may rest but better than nothing)."""
+        import uuid
+        kalshi_side = "yes" if side.upper() in ("BUY", "YES") else "no"
+        price_cents = max(5, min(95, int(round(price * 100))))
+        count = max(1, int(size_usdc / price)) if price > 0 else 1
+        try:
+            from kalshi_python.models import CreateOrderRequest
+            order = CreateOrderRequest(
                 ticker=ticker,
                 action="buy",
                 type="limit",
-                side=kalshi_side.lower(),
-                yes_price=price_cents if kalshi_side.lower() == "yes" else None,
-                no_price=price_cents if kalshi_side.lower() == "no" else None,
+                side=kalshi_side,
+                yes_price=price_cents if kalshi_side == "yes" else None,
+                no_price=price_cents if kalshi_side == "no" else None,
                 count=count,
                 client_order_id=str(uuid.uuid4()),
             )
+            resp = self.client.create_order(order)
             result = resp.to_dict() if hasattr(resp, "to_dict") else {"status": "ok"}
-            log.info("Kalshi order placed: %s", result)
+            log.info("SDK fallback order: %s", result)
             return result
         except Exception as e:
-            log.error("Kalshi order failed: %s", e)
+            log.error("SDK order failed: %s", e)
             return {"error": str(e)}
 
     def _place_polymarket_order(self, token_id: str, side: str, price: float,
