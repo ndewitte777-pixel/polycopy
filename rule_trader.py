@@ -322,6 +322,224 @@ def _nhl_rules(game: dict) -> list[dict]:
 
 # ── Main dispatcher ─────────────────────────────────────────────────────────
 
+def _pga_rules(game: dict) -> list[dict]:
+    """
+    PGA Tour rules based on leaderboard position.
+    Covers: Win, Top 5/10/20, Make Cut, Score O/U, 3-Balls, Round Leader.
+    """
+    signals = []
+    players = game.get("players", [])
+    round_num = int(game.get("round", 0) or 0)
+
+    if not players or round_num == 0:
+        return signals
+
+    def _parse_score(score_str: str) -> int:
+        s = str(score_str).strip()
+        if s == "E":
+            return 0
+        try:
+            return int(s)
+        except (ValueError, TypeError):
+            return 0
+
+    def _parse_position(pos_str: str) -> int:
+        s = str(pos_str).strip().lstrip("T")
+        try:
+            return int(s)
+        except (ValueError, TypeError):
+            return 999
+
+    leader = players[0] if players else {}
+    leader_score = _parse_score(leader.get("score", "E"))
+    leader_name = leader.get("name", "?")
+    leader_last = leader.get("last_name", "?")
+
+    # Calculate field average score for O/U
+    scored_players = [p for p in players[:30]
+                      if p.get("score") and p.get("score") != "?"]
+    avg_score = (sum(_parse_score(p["score"]) for p in scored_players) /
+                 len(scored_players)) if scored_players else 0
+
+    for i, player in enumerate(players[:20]):
+        name = player.get("name", "?")
+        last_name = player.get("last_name", "?")
+        pos = _parse_position(player.get("position", "99"))
+        score = _parse_score(player.get("score", "E"))
+        thru = player.get("thru", "F")
+        shots_back = score - leader_score
+
+        # ── Tournament Winner ──────────────────────────────────────
+        if round_num >= 3 and pos == 1 and score <= -10:
+            margin = score - _parse_score(players[1]["score"]) if len(players) > 1 else -2
+            if margin <= -2:  # leading by 2+ shots
+                signals.append({
+                    "market_type": "WIN",
+                    "bet_side": "YES",
+                    "team": last_name,
+                    "player_name": name,
+                    "confidence": min(78, 65 + abs(margin) * 3),
+                    "reason": f"{name} leads by {abs(margin)} at {score} after R{round_num}",
+                })
+
+        # ── Top 5 finish ──────────────────────────────────────────
+        if round_num >= 2 and pos <= 3 and score <= -8:
+            signals.append({
+                "market_type": "TOP5",
+                "bet_side": "YES",
+                "team": last_name,
+                "player_name": name,
+                "confidence": 68,
+                "reason": f"{name} T{pos} at {score} after R{round_num} — strong top 5 position",
+            })
+
+        # ── Top 10 finish ─────────────────────────────────────────
+        if round_num >= 2 and pos <= 5 and score <= -6:
+            signals.append({
+                "market_type": "TOP10",
+                "bet_side": "YES",
+                "team": last_name,
+                "player_name": name,
+                "confidence": 67,
+                "reason": f"{name} T{pos} at {score} after R{round_num}",
+            })
+
+        # ── Make the Cut ─────────────────────────────────────────
+        if round_num == 2 and 25 <= pos <= 55 and -3 <= shots_back <= 1:
+            signals.append({
+                "market_type": "MAKECUT",
+                "bet_side": "YES",
+                "team": last_name,
+                "player_name": name,
+                "confidence": 66,
+                "reason": f"{name} pos {pos} at {score} — on cut bubble, likely to make it",
+            })
+
+        # ── Round Leader (for next round) ─────────────────────────
+        if round_num in (1, 2) and pos == 1 and score <= -6:
+            next_round = round_num + 1
+            r_lead_type = f"R{next_round}LEAD"
+            signals.append({
+                "market_type": r_lead_type,
+                "bet_side": "YES",
+                "team": last_name,
+                "player_name": name,
+                "confidence": 65,
+                "reason": f"{name} leads R{round_num} at {score} — likely to hold lead in R{next_round}",
+            })
+
+        # ── 3-Ball Matchup — leader vs next two players ───────────
+        if i == 0 and len(players) >= 3 and round_num >= 1:
+            group = [players[0], players[1], players[2]]
+            group_names = [p.get("name", "?") for p in group]
+            group_scores = [_parse_score(p.get("score", "E")) for p in group]
+            best_in_group_idx = group_scores.index(min(group_scores))
+            if group_scores[best_in_group_idx] < min(group_scores[1:]) - 1:  # 2+ ahead
+                winner = group[best_in_group_idx]
+                signals.append({
+                    "market_type": "3BALL",
+                    "bet_side": "YES",
+                    "team": winner.get("last_name", "?"),
+                    "player_name": winner.get("name", "?"),
+                    "group_players": group_names,
+                    "confidence": 67,
+                    "reason": f"{winner.get('name')} leads 3-ball group by 2+ shots",
+                })
+
+    # ── Score Total O/U ────────────────────────────────────────────
+    # Bet UNDER if field is scoring well above par (scoring easier day)
+    # Bet OVER if field is struggling (scoring harder day)
+    if round_num >= 1 and len(scored_players) >= 10:
+        if avg_score <= -4:  # field averaging -4 or better = scoring fest = UNDER
+            signals.append({
+                "market_type": "SCORE_UNDER",
+                "bet_side": "NO",  # NO on OVER = UNDER
+                "team": None,
+                "player_name": None,
+                "confidence": 66,
+                "reason": f"Field averaging {avg_score:.1f} in R{round_num} — low scoring conditions, UNDER",
+            })
+        elif avg_score >= 0:  # field averaging over par = OVER
+            signals.append({
+                "market_type": "SCORE_OVER",
+                "bet_side": "YES",
+                "team": None,
+                "player_name": None,
+                "confidence": 65,
+                "reason": f"Field averaging {avg_score:.1f} in R{round_num} — tough conditions, OVER",
+            })
+
+    return signals
+
+
+def _pga_match_market(signal: dict, all_markets: list) -> tuple[dict | None, float]:
+    """
+    Find the right Kalshi PGA market for a signal.
+    PGA markets include player name in ticker or question.
+    """
+    player_name = signal.get("player_name", "")
+    last_name = signal.get("team", "")
+    market_type = signal.get("market_type", "")
+    group_players = signal.get("group_players", [])  # for 3-balls
+
+    # Map market type to Kalshi series
+    type_to_series = {
+        "WIN": ["KXPGATOUR"],
+        "TOP5": ["KXPGATOP5"],
+        "TOP10": ["KXPGATOP10", "KXPGATOP20"],
+        "TOP20": ["KXPGATOP20"],
+        "MAKECUT": ["KXPGAMAKECUT"],
+        "R1LEAD": ["KXPGAR1LEAD"],
+        "R2LEAD": ["KXPGAR2LEAD"],
+        "R3LEAD": ["KXPGAR3LEAD"],
+        "SCORE_OVER": ["KXPGASCORE"],
+        "SCORE_UNDER": ["KXPGASCORE"],
+        "3BALL": ["KXPGA3BALL", "KXPGAGROUP"],
+        "BIRDIE": ["KXPGABIRDIE"],
+        "EAGLE": ["KXPGAEAGLE"],
+        "HIO": ["KXPGAHIO"],
+    }
+    target_series = type_to_series.get(market_type, [])
+
+    best_market = None
+    best_score = 0.0
+
+    for m in all_markets:
+        ticker = m.get("ticker", "").upper()
+        question = (m.get("question") or m.get("title") or "").lower()
+
+        # Must be a PGA series
+        ticker_series = ticker.split("-")[0]
+        if target_series and ticker_series not in target_series:
+            continue
+
+        match_score = 0.0
+
+        # Player name matching
+        if last_name and last_name.lower() in question:
+            match_score += 0.7
+        if player_name:
+            parts = player_name.lower().split()
+            if any(p in question for p in parts if len(p) > 2):
+                match_score += 0.3
+
+        # 3-ball: match all players in group
+        if market_type == "3BALL" and group_players:
+            matched = sum(1 for p in group_players
+                         if p.lower().split()[-1] in question)
+            match_score = matched / len(group_players)
+
+        # Score markets: match tournament name
+        if market_type in ("SCORE_OVER", "SCORE_UNDER"):
+            match_score = 0.5  # any score market is potentially relevant
+
+        if match_score > best_score:
+            best_score = match_score
+            best_market = m
+
+    return best_market, best_score
+
+
 SPORT_RULES = {
     "soccer": _soccer_rules,
     "world_cup": _soccer_rules,
@@ -330,6 +548,7 @@ SPORT_RULES = {
     "nfl": _nfl_rules,
     "mlb": _mlb_rules,
     "nhl": _nhl_rules,
+    "pga": _pga_rules,
 }
 
 
@@ -442,19 +661,24 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
         if not signals:
             continue
 
-        # Only bet on games that are actually IN PROGRESS
-        # Prevent pre-game bets where we have no real edge
-        game_clock = game.get("clock", "")
-        game_status = game.get("status", "").lower()
-        period = int(game.get("period", 0) or 0)
+        # Only bet on games actually in progress (not pre-game)
+        # PGA is handled differently — check round number instead
+        sport = game.get("sport", "").lower()
+        if sport == "pga":
+            round_num = int(game.get("round", 0) or 0)
+            is_in_progress = round_num >= 1 and game.get("in_progress", False)
+        else:
+            game_clock = game.get("clock", "")
+            game_status = game.get("status", "").lower()
+            period = int(game.get("period", 0) or 0)
+            is_in_progress = (
+                period > 0 and
+                game_status in ("in progress", "live", "active", "") and
+                game.get("is_live", False)
+            )
 
-        is_in_progress = (
-            period > 0 and
-            game_status in ("in progress", "live", "active", "") and
-            game.get("is_live", False)
-        )
         if not is_in_progress:
-            log.debug("Rule trader: skipping pre-game or finished game %s", game_id)
+            log.debug("Rule trader: skipping pre-game or finished: %s", game_id)
             continue
 
         # Filter signals by confidence threshold
@@ -480,53 +704,78 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
         SPORT_SERIES = {
             "mlb": ["KXMLBGAME", "KXMLBTOTAL", "KXMLBSPREAD", "KXMLBHIT",
                     "KXMLBHR", "KXMLBKS", "KXMLBHRR", "KXMLBTB", "KXMLBRFI"],
-            "nba": ["KXNBAGAME", "KXNBATOTAL", "KXNBASPREAD", "KXNBAPTS"],
+            "nba": ["KXNBAGAME", "KXNBATOTAL", "KXNBASPREAD", "KXNBAPTS",
+                    "KXWNBAGAME", "KXWNBATOTAL", "KXWNBASPREAD", "KXWNBAPTS"],
             "nfl": ["KXNFLGAME", "KXNFLTOTAL", "KXNFLSPREAD"],
             "nhl": ["KXNHLGAME", "KXNHLTOTAL", "KXNHLSPREAD"],
             "soccer": ["KXWCGAME", "KXWCTOTAL", "KXWCSPREAD", "KXWCBTTS",
                        "KXWCGOAL", "KXSOCEPL", "KXSOCUCL"],
             "world_cup": ["KXWCGAME", "KXWCTOTAL", "KXWCSPREAD", "KXWCBTTS", "KXWCGOAL"],
-            "nba": ["KXWNBAGAME", "KXWNBATOTAL", "KXWNBASPREAD", "KXWNBAPTS"],
+            # PGA — all tournament markets
+            "pga": ["KXPGATOUR",      # Tournament winner
+                    "KXPGATOP5",       # Top 5 finish
+                    "KXPGATOP10",      # Top 10 finish
+                    "KXPGATOP20",      # Top 20 finish
+                    "KXPGAMAKECUT",    # Make the cut
+                    "KXPGAR1LEAD",     # Round 1 leader
+                    "KXPGAR2LEAD",     # Round 2 leader
+                    "KXPGAR3LEAD",     # Round 3 leader
+                    "KXPGASCORE",      # Score totals (over/under)
+                    "KXPGA3BALL",      # 3-ball matchups
+                    "KXPGAGROUP",      # Group betting
+                    "KXPGAHIO",        # Hole in one
+                    "KXPGABIRDIE",     # Birdie or better
+                    "KXPGAEAGLE",      # Eagle or better
+                    "KXPGANAT",        # Nationality props
+                    ],
         }
 
         allowed_series = SPORT_SERIES.get(sport, [])
 
-        # Build expanded market list including parlay legs
-        expanded_markets = list(all_kalshi_markets)
-        for m in all_kalshi_markets:
-            if m.get("title", "").count(",") >= 1:
-                expanded_markets.extend(_extract_single_legs(m))
+        # PGA uses player-name matching, not team abbrev matching
+        if sport == "pga":
+            target_market, best_score = _pga_match_market(best, all_kalshi_markets)
+            if not target_market or best_score < 0.4:
+                log.info("Rule trader: no PGA market match for %s (score=%.2f)",
+                         best.get("player_name", "?"), best_score)
+                continue
+        else:
+            # Build expanded market list including parlay legs
+            expanded_markets = list(all_kalshi_markets)
+            for m in all_kalshi_markets:
+                if m.get("title", "").count(",") >= 1:
+                    expanded_markets.extend(_extract_single_legs(m))
 
-        for m in expanded_markets:
-            ticker = m.get("ticker", "")
+            for m in expanded_markets:
+                ticker = m.get("ticker", "")
 
-            # Filter by sport series if we know the sport
-            if allowed_series and ticker:
-                series_prefix = ticker.split("-")[0]
-                if series_prefix not in allowed_series:
-                    continue
+                # Filter by sport series if we know the sport
+                if allowed_series and ticker:
+                    series_prefix = ticker.split("-")[0]
+                    if series_prefix not in allowed_series:
+                        continue
 
-            q = m.get("question", m.get("title", "")).lower()
-            # Pass ticker for abbreviation-based matching
-            match_score = match_game_to_market(game, q, ticker)
+                q = m.get("question", m.get("title", "")).lower()
+                match_score = match_game_to_market(game, q, ticker)
 
-            if market_type == "TOTAL" and any(w in q for w in ["over", "under", "total", "goals", "runs", "points"]):
-                match_score += 0.25
-            elif market_type == "SPREAD" and "spread" in q:
-                match_score += 0.25
-            elif market_type == "WIN" and not any(w in q for w in ["spread", "over", "under", "total", "goal", "hit", "strikeout"]):
-                match_score += 0.15
+                if market_type == "TOTAL" and any(w in q for w in ["over", "under", "total", "goals", "runs", "points"]):
+                    match_score += 0.25
+                elif market_type == "SPREAD" and "spread" in q:
+                    match_score += 0.25
+                elif market_type == "WIN" and not any(w in q for w in ["spread", "over", "under", "total", "goal", "hit", "strikeout"]):
+                    match_score += 0.15
 
-            if team and team.lower().split()[-1] in q:
-                match_score += 0.35
+                if team and team.lower().split()[-1] in q:
+                    match_score += 0.35
 
-            if match_score > best_score:
-                best_score = match_score
-                target_market = m
+                if match_score > best_score:
+                    best_score = match_score
+                    target_market = m
 
-        if not target_market or best_score < 0.4:
-            log.info("Rule trader: no confident Kalshi match for %s (best=%.2f)", game_id, best_score)
-            continue
+            if not target_market or best_score < 0.4:
+                log.info("Rule trader: no confident Kalshi match for %s (best=%.2f)",
+                         game_id, best_score)
+                continue
 
         ticker = target_market.get("ticker", "")
         if not ticker:
@@ -575,7 +824,56 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
         bankroll = state.get("bankroll", 25.0)
         size_usdc = min(max(bankroll * kelly_f, 1.0), MAX_TRADE_USDC)
 
-        kalshi_side = "YES" if bet_side in ("YES", "HOME", "OVER") else "NO"
+        # ── Statistical EV check ──────────────────────────────────
+        # Evaluate signal using probability models + recent form
+        try:
+            import stats_models as sm
+            eval_result = sm.evaluate_signal(
+                game=game,
+                market_price=market_price,
+                signal_type=market_type,
+                signal_side=bet_side,
+                session=requests.Session(),
+            )
+            true_prob = eval_result.get("true_prob", 0.5)
+            ev_data = eval_result.get("ev", {})
+            stats_reason = eval_result.get("reason", "")
+
+            # Require positive EV and minimum edge
+            if not eval_result.get("should_trade", False):
+                log.info(
+                    "Rule trader: SKIP %s %s — no EV | %s",
+                    game_id, market_type, stats_reason[:80]
+                )
+                continue
+
+            # Boost confidence based on model
+            model_conf = eval_result.get("confidence", confidence)
+            confidence = int((confidence + model_conf) / 2)
+
+            log.info(
+                "Stats model: %s | edge=%+.1f%% | EV=%+.1f%% | "
+                "true_prob=%.1f%% | market=%.1f%%",
+                game_id,
+                ev_data.get("edge", 0) * 100,
+                ev_data.get("ev_pct", 0),
+                true_prob * 100,
+                market_price * 100,
+            )
+
+            # Size bet by Kelly criterion
+            kelly = eval_result.get("quarter_kelly", 0)
+            if kelly > 0:
+                from config import YOUR_BANKROLL_USDC, MAX_TRADE_USDC
+                bankroll = state.get("bankroll", YOUR_BANKROLL_USDC)
+                kelly_size = bankroll * kelly
+                size_usdc = min(kelly_size, MAX_TRADE_USDC,
+                                size_usdc * 1.3 if kelly > 0.05 else size_usdc)
+                size_usdc = max(MIN_BET_SIZE, size_usdc)
+
+        except Exception as e:
+            log.debug("Stats model error: %s — using rule confidence", e)
+            stats_reason = ""
 
         # Enforce minimum bet size — no tiny bets
         size_usdc = max(size_usdc, MIN_BET_SIZE)
