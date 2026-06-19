@@ -128,15 +128,17 @@ def _soccer_rules(game: dict) -> list[dict]:
             "reason": f"0-0 with only {remaining:.0f}min left, UNDER 0.5 goals likely",
         })
 
-    # Rule: Already high scoring → OVER
-    if total_goals >= 3 and elapsed <= 70:
-        signals.append({
-            "market_type": "TOTAL",
-            "bet_side": "OVER",
-            "team": None,
-            "confidence": 70,
-            "reason": f"{total_goals} goals already scored with {remaining:.0f}min left",
-        })
+    # Rule: Already high scoring → OVER (only fire in 2nd half with clear pace)
+    if total_goals >= 3 and elapsed >= 60:
+        goals_per_90 = total_goals / elapsed * 90
+        if goals_per_90 >= 4.5:  # pace must justify the OVER
+            signals.append({
+                "market_type": "TOTAL",
+                "bet_side": "OVER",
+                "team": None,
+                "confidence": min(78, 60 + int(total_goals * 5)),
+                "reason": f"{total_goals} goals in {elapsed:.0f}min ({goals_per_90:.1f}/90 pace) — OVER likely",
+            })
 
     return signals
 
@@ -253,29 +255,30 @@ def _mlb_rules(game: dict) -> list[dict]:
     score_diff = abs(scores[0] - scores[1])
     total_runs = sum(scores)
 
-    # Rule: Large lead after 7th inning
-    if period >= 7 and score_diff >= 3:
+    # Rule: Large lead after 7th inning (not earlier — games can change)
+    if period >= 7 and score_diff >= 4:
         leader_idx = 0 if scores[0] > scores[1] else 1
         signals.append({
             "market_type": "WIN",
             "bet_side": "HOME" if leader_idx == 0 else "AWAY",
             "team": names[leader_idx],
-            "confidence": min(88, 68 + score_diff * 3),
+            "confidence": min(88, 65 + score_diff * 4),
             "reason": f"{names[leader_idx]} leads {scores[leader_idx]}-{scores[1-leader_idx]} "
                       f"in inning {period}",
         })
 
-    # Rule: High run pace → OVER
-    if period >= 4 and total_runs >= 7:
+    # Rule: High run pace → OVER (only fire after inning 5)
+    if period >= 5 and total_runs >= 8:
+        pace = total_runs / period * 9
         signals.append({
             "market_type": "TOTAL",
             "bet_side": "OVER",
             "team": None,
-            "confidence": 70,
-            "reason": f"{total_runs} runs through {period} innings — OVER likely",
+            "confidence": min(75, 60 + int(total_runs)),
+            "reason": f"{total_runs} runs through {period} innings ({pace:.1f}/9 pace) — OVER likely",
         })
 
-    # Rule: Low scoring game → UNDER
+    # Rule: Low scoring game → UNDER (only fire after inning 6)
     if period >= 6 and total_runs <= 1:
         signals.append({
             "market_type": "TOTAL",
@@ -439,7 +442,22 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
         if not signals:
             continue
 
-        # Filter by confidence
+        # Only bet on games that are actually IN PROGRESS
+        # Prevent pre-game bets where we have no real edge
+        game_clock = game.get("clock", "")
+        game_status = game.get("status", "").lower()
+        period = int(game.get("period", 0) or 0)
+
+        is_in_progress = (
+            period > 0 and
+            game_status in ("in progress", "live", "active", "") and
+            game.get("is_live", False)
+        )
+        if not is_in_progress:
+            log.debug("Rule trader: skipping pre-game or finished game %s", game_id)
+            continue
+
+        # Filter signals by confidence threshold
         signals = [s for s in signals if s["confidence"] >= MIN_RULE_CONFIDENCE]
         if not signals:
             continue
@@ -489,7 +507,8 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
                     continue
 
             q = m.get("question", m.get("title", "")).lower()
-            match_score = match_game_to_market(game, q)
+            # Pass ticker for abbreviation-based matching
+            match_score = match_game_to_market(game, q, ticker)
 
             if market_type == "TOTAL" and any(w in q for w in ["over", "under", "total", "goals", "runs", "points"]):
                 match_score += 0.25
@@ -505,8 +524,8 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
                 best_score = match_score
                 target_market = m
 
-        if not target_market or best_score < 0.25:
-            log.debug("Rule trader: no matching Kalshi market for %s", game_id)
+        if not target_market or best_score < 0.4:
+            log.info("Rule trader: no confident Kalshi match for %s (best=%.2f)", game_id, best_score)
             continue
 
         ticker = target_market.get("ticker", "")
@@ -560,6 +579,46 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
 
         # Enforce minimum bet size — no tiny bets
         size_usdc = max(size_usdc, MIN_BET_SIZE)
+
+        # --- Claude filter on rule trades ---
+        # Ask Claude to review before placing any real money
+        try:
+            import claude_filter as _cf
+            from config import USE_CLAUDE_FILTER
+            if USE_CLAUDE_FILTER:
+                from sports_data import format_game_context
+                game_summary = format_game_context(game)
+                market_info_for_filter = {
+                    "question": target_market.get("question", "?"),
+                    "outcome": kalshi_side,
+                    "end_date": str(target_market.get("endDate", "")),
+                    "liquidity": target_market.get("liquidity", 0),
+                    "category": "SPORTS",
+                    "url": f"https://kalshi.com/markets/{ticker}",
+                    "extra_context": game_summary,
+                }
+                decision = _cf.evaluate_trade(
+                    market_info=market_info_for_filter,
+                    price=market_price,
+                    your_size=size_usdc,
+                    conviction=1,
+                    num_wallets=1,
+                )
+                if decision.get("decision") == "SKIP":
+                    log.info(
+                        "Claude FILTERED rule trade: %s | conf=%d | %s",
+                        target_market.get("question", "?")[:60],
+                        decision.get("confidence", 0),
+                        decision.get("reason", ""),
+                    )
+                    continue
+                # Adjust size based on Claude's suggestion
+                size_pct = decision.get("suggested_size_pct", 100)
+                if size_pct < 100:
+                    size_usdc = size_usdc * (size_pct / 100)
+                    size_usdc = max(size_usdc, MIN_BET_SIZE)
+        except Exception as e:
+            log.debug("Claude filter error in rule trader: %s — proceeding", e)
 
         log.info(
             "RULE TRADE | %s | %s %s | conf=%d | $%.2f\n  %s\n  Market: %s",
