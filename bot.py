@@ -75,6 +75,10 @@ import sports_data as sd
 import profit_targets as pt
 import live_game_buyer as lgb
 import rule_trader as rt
+import journal as jnl
+import fill_verifier as fv
+import wallet_tracker as wt
+import kalshi_copy as kc
 
 logging.basicConfig(
     level=logging.INFO,
@@ -299,6 +303,10 @@ def build_weekly_report(state: dict) -> dict:
     best_wallet = max(wallet_pnl, key=wallet_pnl.get) if wallet_pnl else "N/A"
     win_rate = (wins / len(recent) * 100) if recent else 0
 
+    # Add journal summary
+    journal_summary = jnl.get_summary(state)
+    wallet_leaderboard = wt.format_leaderboard(state)
+
     return {
         "trade_count": len(recent),
         "wins": wins,
@@ -309,6 +317,10 @@ def build_weekly_report(state: dict) -> dict:
         "worst_trade": worst,
         "best_wallet": best_wallet[:8] + "..." if best_wallet != "N/A" else "N/A",
         "open_positions": state.get("open_positions", 0),
+        "journal_summary": jnl.format_weekly_report(state),
+        "wallet_leaderboard": wallet_leaderboard,
+        "signals_filtered": journal_summary.get("filter_skip_count", 0),
+        "signals_no_match": journal_summary.get("skipped", 0),
     }
 
 
@@ -396,7 +408,23 @@ def process_activity_item(data_api: DataAPI, executor: Executor, state: dict,
         st.mark_seen(state, tx_hash)
         return
 
-    # --- Cooldown ---
+    # --- Wallet performance check ---
+    should_copy, wallet_reason = wt.should_copy_wallet(state, wallet)
+    if not should_copy:
+        log.info("WALLET SKIP | %s | %s", wallet[:8], wallet_reason)
+        jnl.record_signal(state, {
+            "type": "copy", "source": wallet,
+            "market": market_info.get("question", "?"),
+            "ticker": "", "side": side, "price": price,
+            "size": your_size, "action": "skipped",
+            "skip_reason": f"wallet cold streak: {wallet_reason}",
+        })
+        st.mark_seen(state, tx_hash)
+        return
+
+    # Adjust conviction by wallet performance
+    conviction_mult = wt.get_conviction_multiplier(state, wallet, conviction)
+    your_size = min(your_size * conviction_mult, MAX_TRADE_USDC)
     open_lots = state.setdefault("open_lots", {})
     lots_for_token = open_lots.get(token_id, [])
     if side == "BUY" and lots_for_token:
@@ -482,6 +510,14 @@ def process_activity_item(data_api: DataAPI, executor: Executor, state: dict,
                 ai_decision.get("confidence", 0),
                 ai_decision.get("reason", ""),
             )
+            jnl.record_signal(state, {
+                "type": "copy", "source": wallet,
+                "market": market_info.get("question", "?"),
+                "ticker": token_id, "side": side, "price": price,
+                "size": your_size, "action": "filtered",
+                "skip_reason": ai_decision.get("reason", ""),
+                "confidence": ai_decision.get("confidence", 0),
+            })
             notifier.send(
                 title="🤖 Claude skipped a trade",
                 message=(
@@ -501,6 +537,13 @@ def process_activity_item(data_api: DataAPI, executor: Executor, state: dict,
             if not kalshi_ticker:
                 log.info("COPY SKIP | No matching Kalshi market found for: %s",
                          market_info.get("question", "?")[:60])
+                jnl.record_signal(state, {
+                    "type": "copy", "source": wallet,
+                    "market": market_info.get("question", "?"),
+                    "ticker": "", "side": side, "price": price,
+                    "size": your_size, "action": "no_match",
+                    "skip_reason": "no Kalshi equivalent found",
+                })
                 st.mark_seen(state, tx_hash)
                 return
             trade_token_id = kalshi_ticker
@@ -510,6 +553,10 @@ def process_activity_item(data_api: DataAPI, executor: Executor, state: dict,
 
         resp = executor.place_order(token_id=trade_token_id, side=side,
                                     price=price, size_usdc=your_size)
+
+        # Verify fill and track order
+        from kalshi_data import _get_api
+        resp = fv.verify_order(resp, trade_token_id, side, your_size, _get_api())
         st.record_trade(state, {
             "tx_hash": tx_hash, "wallet": wallet, "side": side,
             "token_id": token_id, "condition_id": condition_id,
@@ -519,7 +566,8 @@ def process_activity_item(data_api: DataAPI, executor: Executor, state: dict,
         state["open_positions"] = state.get("open_positions", 0) + 1
         state["daily_trades"] = state.get("daily_trades", 0) + 1
         state["total_at_risk"] = state.get("total_at_risk", 0.0) + your_size
-        lots_for_token.append({
+
+        lot_entry = {
             "entry_price": price,
             "size_usdc": your_size,
             "peak_price": price,
@@ -528,8 +576,25 @@ def process_activity_item(data_api: DataAPI, executor: Executor, state: dict,
             "market_info": market_info,
             "opened_at": time.time(),
             "took_profit": False,
+            "source": "copy",
+        }
+        lots_for_token.append(lot_entry)
+        open_lots[trade_token_id] = lots_for_token
+
+        # Track fill status for resting orders
+        fv.track_order(state, resp, trade_token_id, your_size, lot_entry)
+
+        # Record in journal
+        jnl.record_signal(state, {
+            "type": "copy", "source": wallet,
+            "market": market_info.get("question", "?"),
+            "ticker": trade_token_id, "side": side, "price": price,
+            "size": your_size, "action": "placed",
         })
-        open_lots[token_id] = lots_for_token
+
+        # Track wallet performance
+        wt.record_trade_placed(state, wallet, trade_token_id, price, your_size)
+
         notifier.notify_trade_opened(
             wallet, side, market_info, price, your_size, DRY_RUN, conviction
         )
@@ -763,6 +828,25 @@ def run():
                     )
                     if rule_entries:
                         log.info("Rule trader: %d new positions opened", rule_entries)
+
+                # Kalshi-native copy trading — watch smart money on Kalshi directly
+                kc_opened = kc.run_kalshi_copy(
+                    all_markets=short_term + long_term,
+                    executor=executor,
+                    state=state,
+                    session=session,
+                    notifier=notifier,
+                    claude_filter_fn=cf.evaluate_trade if USE_CLAUDE_FILTER else None,
+                )
+                if kc_opened:
+                    log.info("Kalshi copy: %d new positions", kc_opened)
+
+                # Check and cancel timed-out resting orders
+                from kalshi_data import _get_api
+                cancelled = fv.check_pending_orders(state, _get_api())
+                if cancelled:
+                    log.info("Cancelled %d timed-out resting orders: %s",
+                             len(cancelled), cancelled)
 
                 last_live_poll_time = now
 
