@@ -549,9 +549,9 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
             log.info("Rule trader: no real market question for %s", game_id)
             continue
 
-        # Skip if source is not kalshi single-game market
-        if target_market.get("_source") != "kalshi":
-            log.info("Rule trader: market not from Kalshi for %s", game_id)
+        # Skip if this is a parlay leg (can't order individually)
+        if target_market.get("_source") == "kalshi_parlay_leg":
+            log.info("Rule trader: skipping parlay leg for %s", game_id)
             continue
 
         market_price = target_market.get("yes_price", 0.5)
