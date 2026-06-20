@@ -938,48 +938,41 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
 
         kalshi_side = "YES" if bet_side in ("YES", "HOME", "OVER") else "NO"
 
-        # For WIN markets, adjust side based on which team is in the Kalshi ticker
-        # Kalshi WIN tickers ask "Will [team1] win?" where team1 is first in ticker
-        # e.g. KXMLBGAME-26JUN192210BOSSEA-SEA asks "Will SEA win?" (SEA is the YES side)
-        # Wait — actually the ticker team_part is BOSSEA, and the suffix -SEA means SEA is yes
-        # Let's check the market question to determine yes side
+        # For WIN markets, check the question to determine which side to bet
+        # "Will Boston win?" → YES=Boston, NO=Seattle
+        # We need to know if the team we want to win is the YES side
         if market_type == "WIN" and ticker and target_market:
-            q_lower = (target_market.get("question") or
-                       target_market.get("title") or "").lower()
-            # The team we want to win
-            win_team = team or ""
-            win_team_lower = win_team.lower()
-
-            # Check if our winning team is the YES side in this market
-            # "Will Boston win?" → YES = Boston wins
-            # If our signal is for Boston to win, we want YES
+            import re as _re_win
+            q = (target_market.get("question") or
+                 target_market.get("title") or "").lower()
             teams_in_game = game.get("teams", [])
+
+            # Find the leading team based on bet_side
             leader_team = None
             for t in teams_in_game:
-                abbr = t.get("abbreviation", "").upper()
-                aliases = {"ARI": ["AZ"], "OAK": ["ATH"]}.get(abbr, [abbr])
-                if any(a in ticker_team_part for a in aliases):
-                    if bet_side == "HOME" and t.get("home_away") == "home":
-                        leader_team = t
-                    elif bet_side == "AWAY" and t.get("home_away") == "away":
-                        leader_team = t
+                if bet_side == "HOME" and t.get("home_away") == "home":
+                    leader_team = t
+                elif bet_side == "AWAY" and t.get("home_away") == "away":
+                    leader_team = t
 
             if leader_team:
+                leader_name = (leader_team.get("name") or "").lower()
                 leader_abbr = leader_team.get("abbreviation", "").upper()
-                leader_aliases = {"ARI": ["AZ"], "OAK": ["ATH"]}.get(
-                    leader_abbr, [leader_abbr])
-                # Find where in the ticker the leader appears
-                # KXMLBGAME-26JUN192210BOSSEA: BOS is first, SEA is second
-                # Kalshi market question: "Will BOS win?" → YES=BOS, NO=SEA
-                # Or it might be "New York M vs Philadelphia Winner?" → YES=first team
-                if ticker_team_part:
-                    half = len(ticker_team_part) // 2
-                    first_half = ticker_team_part[:half+1]
-                    second_half = ticker_team_part[half:]
-                    leader_in_first = any(a in first_half for a in leader_aliases)
-                    kalshi_side = "yes" if leader_in_first else "no"
-                    log.debug("WIN side: leader=%s ticker=%s → %s",
-                              leader_abbr, ticker_team_part, kalshi_side)
+                leader_words = [w for w in leader_name.split() if len(w) > 3]
+
+                # Check if leader appears in question (YES side)
+                # "Will Boston win?" → "boston" in q → leader is YES
+                leader_in_q = (any(w in q for w in leader_words) or
+                               leader_abbr.lower() in q)
+
+                if leader_in_q:
+                    kalshi_side = "yes"
+                else:
+                    # Leader is the NO side (market asks about opponent)
+                    kalshi_side = "no"
+
+                log.debug("WIN side: %s %s → kalshi_side=%s (q='%s')",
+                          leader_abbr, bet_side, kalshi_side, q[:50])
 
         # --- Claude filter on rule trades ---
         # Ask Claude to review before placing any real money
