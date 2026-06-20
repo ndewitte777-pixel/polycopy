@@ -208,70 +208,71 @@ def fetch_all_live_games(session: requests.Session = None) -> list:
 def match_game_to_market(game: dict, market_question: str,
                          market_ticker: str = "") -> float:
     """
-    Returns a confidence score (0-1) that a game matches a Kalshi market.
-
-    Primary matching: Kalshi tickers embed team codes and dates.
-    e.g. KXMLBGAME-26JUN172140PITATH → PIT vs ATH on June 17
-         KXWCGAME-26JUN18CZERSA → CZE vs RSA on June 18
-
-    Secondary matching: question text keyword overlap.
+    Returns confidence score (0-1) that a game matches a Kalshi market.
+    Uses Kalshi ticker abbreviations as primary signal.
+    e.g. KXMLBGAME-26JUN192145MINAZ → MIN vs AZ (Minnesota vs Arizona)
     """
+    import re as _re
     score = 0.0
     teams = game.get("teams", [])
     ticker_upper = market_ticker.upper() if market_ticker else ""
 
-    # --- Primary: match team abbreviations in Kalshi ticker ---
-    # Kalshi ticker format: KXMLBGAME-26JUN172140PITATH
-    # Date is encoded as YYMMMDD (e.g. 26JUN17 = June 17, 2026)
+    # ESPN → Kalshi ticker code mappings
+    # Kalshi uses non-standard codes for some teams (ARI→AZ, OAK→ATH, etc)
+    ABBREV_ALIASES = {
+        "ARI": ["AZ", "ARI"], "ATH": ["ATH", "OAK"], "OAK": ["ATH", "OAK"],
+        "SD": ["SD"], "SF": ["SF"], "KC": ["KC"], "LAA": ["LAA"],
+        "LAD": ["LAD"], "NYM": ["NYM"], "NYY": ["NYY"], "TB": ["TB"],
+        "WSH": ["WSH", "WAS"], "CWS": ["CWS"], "MIN": ["MIN"],
+        "BOS": ["BOS"], "SEA": ["SEA"], "BAL": ["BAL"], "TOR": ["TOR"],
+        "HOU": ["HOU"], "TEX": ["TEX"], "MIL": ["MIL"], "STL": ["STL"],
+        "PIT": ["PIT"], "CIN": ["CIN"], "CHC": ["CHC"], "COL": ["COL"],
+        "DET": ["DET"], "CLE": ["CLE"], "MIA": ["MIA"], "PHI": ["PHI"],
+        "ATL": ["ATL"], "NY": ["NY"], "PHX": ["PHX"], "LV": ["LV"],
+        "LA": ["LA"], "IND": ["IND"], "CHI": ["CHI"], "GS": ["GS"],
+        "CON": ["CON"], "DAL": ["DAL"], "PDX": ["PDX"],
+    }
+
+    # Extract team code suffix from Kalshi ticker
+    # e.g. KXMLBGAME-26JUN192145MINAZ → last segment after stripping digits/time = MINAZ
     ticker_team_part = ""
-    ticker_date_str = ""
     if ticker_upper:
         parts = ticker_upper.split("-")
         if len(parts) >= 2:
             last = parts[-1]
-            import re as _re
-            # Extract team codes (letters only at end)
-            team_match = _re.search(r'([A-Z]{6,})$', last)
+            # Remove trailing number (line value like -6)
+            last = _re.sub(r"-\d+$", "", last)
+            # Extract letters at the end (team codes)
+            team_match = _re.search(r"([A-Z]{4,})$", last)
             if team_match:
                 ticker_team_part = team_match.group(1)
-            # Extract date (e.g. 26JUN17)
-            date_match = _re.search(r'(\d{2}[A-Z]{3}\d{2})', last)
-            if date_match:
-                ticker_date_str = date_match.group(1)
 
-    abbrevs = []
-    full_names = []
-    for team in teams:
-        abbr = team.get("abbreviation", "").upper()
-        name = (team.get("name") or team.get("displayName") or "").lower()
-        if abbr:
-            abbrevs.append(abbr)
-        if name:
-            full_names.append(name)
-            # Also add last word (e.g. "Pittsburgh Pirates" → "pirates")
-            words = name.split()
-            if words:
-                full_names.append(words[-1])
-                full_names.append(words[0])
+    # Score: how many teams match the ticker
+    if ticker_team_part:
+        matched = 0
+        for team in teams:
+            espn_abbr = team.get("abbreviation", "").upper()
+            aliases = ABBREV_ALIASES.get(espn_abbr, [espn_abbr])
+            for alias in aliases:
+                if alias in ticker_team_part:
+                    matched += 1
+                    break
+        if matched >= 2:
+            score += 0.8
+        elif matched == 1:
+            score += 0.4
 
-    # Score ticker abbreviation matches (highest weight)
-    if ticker_team_part and abbrevs:
-        matched_abbrevs = sum(1 for a in abbrevs if a in ticker_team_part)
-        if matched_abbrevs == 2:
-            score += 0.8  # both teams match — very confident
-        elif matched_abbrevs == 1:
-            score += 0.4  # one team matches
-
-    # --- Secondary: question text keyword matching ---
+    # Secondary: question text matching
     q_lower = market_question.lower() if market_question else ""
-    if q_lower:
-        for name in full_names:
-            if name and len(name) > 3 and name in q_lower:
+    if q_lower and score < 0.5:
+        for team in teams:
+            name = (team.get("name") or team.get("displayName") or "").lower()
+            words = [w for w in name.split() if len(w) > 3]
+            if any(w in q_lower for w in words):
                 score += 0.2
                 break
 
     return min(score, 1.0)
-
 
 def format_game_context(game: dict) -> str:
     """Format game state as a string for Claude's prompt."""

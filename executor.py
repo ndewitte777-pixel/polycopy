@@ -171,7 +171,7 @@ class Executor:
                 count=count,
                 client_order_id=str(uuid.uuid4()),
             )
-            resp = self.client.create_order(order)
+            resp = self.client.create_order(create_order_request=order)
             result = resp.to_dict() if hasattr(resp, "to_dict") else {}
             status = result.get("order", {}).get("status", "unknown")
             log.info("Kalshi order placed: status=%s ticker=%s price=%dc count=%d",
@@ -200,7 +200,7 @@ class Executor:
                 count=count,
                 client_order_id=str(uuid.uuid4()),
             )
-            resp = self.client.create_order(order)
+            resp = self.client.create_order(create_order_request=order)
             result = resp.to_dict() if hasattr(resp, "to_dict") else {"status": "ok"}
             log.info("SDK fallback order: %s", result)
             return result
