@@ -759,27 +759,25 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
                 q = m.get("question", m.get("title", "")).lower()
                 match_score = match_game_to_market(game, q, ticker)
 
-                if market_type == "TOTAL" and any(w in q for w in ["over", "under", "total", "goals", "runs", "points"]):
+                if market_type == "TOTAL" and any(w in q for w in ["over", "under", "total", "goals", "runs", "points", "winner"]):
                     import re as _re2
-                    line_match = _re2.search(r'(\d+\.?\d*)\s*(goal|run|point|total|over|under)', q)
-                    preferred = best.get("preferred_line", 0)
-                    line_val = float(line_match.group(1)) if line_match else 999
+                    # Extract line from ticker suffix e.g. KXMLBTOTAL-26JUN192145MINAZ-9 → 9
+                    ticker_line_match = _re2.search(r'-(\d+\.?\d*)$', ticker)
+                    line_val = float(ticker_line_match.group(1)) if ticker_line_match else 999
 
-                    # Skip if line is way too high to be realistic
+                    # Skip impossible lines
                     max_total = {
-                        "soccer": 3.5, "world_cup": 3.5,
-                        "mlb": 12.5, "nba": 230.5, "nhl": 6.5,
-                    }.get(sport, 10.5)
+                        "soccer": 4.5, "world_cup": 4.5,
+                        "mlb": 13.5, "nba": 235.5, "nhl": 7.5,
+                    }.get(sport, 15.0)
                     if line_val > max_total:
                         continue
 
-                    # Prefer lines closest to current score + expected pace
+                    # Prefer line closest to current score + ~2 more runs
                     current_total = sum(game.get("scores", [0, 0]))
-                    if line_val > 0 and line_val >= current_total:
-                        proximity_score = 1 / (1 + abs(line_val - (current_total + 2)))
-                        match_score += 0.25 + proximity_score * 0.2
-                    else:
-                        match_score += 0.1  # line already passed
+                    target_line = current_total + 2
+                    proximity = 1 / (1 + abs(line_val - target_line))
+                    match_score += 0.25 + proximity * 0.15
                 elif market_type == "SPREAD" and "spread" in q:
                     # Filter spread lines — only realistic margins
                     # Extract the number from question e.g. "wins by more than 3.5" → 3.5

@@ -234,18 +234,17 @@ def match_game_to_market(game: dict, market_question: str,
     }
 
     # Extract team code suffix from Kalshi ticker
-    # e.g. KXMLBGAME-26JUN192145MINAZ → last segment after stripping digits/time = MINAZ
+    # e.g. KXMLBTOTAL-26JUN192140LAAATH-19 → seg[1]="26JUN192140LAAATH" → LAAATH
+    # e.g. KXWCGAME-26JUN18CZERSA → seg[1]="26JUN18CZERSA" → CZERSA
+    # Note: last segment may be line number (-19, -9 etc) so use index 1 not -1
     ticker_team_part = ""
     if ticker_upper:
         parts = ticker_upper.split("-")
-        if len(parts) >= 2:
-            last = parts[-1]
-            # Remove trailing number (line value like -6)
-            last = _re.sub(r"-\d+$", "", last)
-            # Extract letters at the end (team codes)
-            team_match = _re.search(r"([A-Z]{4,})$", last)
-            if team_match:
-                ticker_team_part = team_match.group(1)
+        # Second segment contains date+teams (e.g. "26JUN192140LAAATH")
+        seg = parts[1] if len(parts) >= 2 else parts[0]
+        team_match = _re.search(r"([A-Z]{3,})$", seg)
+        if team_match:
+            ticker_team_part = team_match.group(1)
 
     # Score: how many teams match the ticker
     if ticker_team_part:
