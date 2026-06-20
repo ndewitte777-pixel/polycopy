@@ -705,15 +705,13 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
 
         # Define which Kalshi series are relevant per sport
         SPORT_SERIES = {
-            "mlb": ["KXMLBGAME", "KXMLBTOTAL", "KXMLBSPREAD", "KXMLBHIT",
-                    "KXMLBHR", "KXMLBKS", "KXMLBHRR", "KXMLBTB", "KXMLBRFI"],
-            "nba": ["KXNBAGAME", "KXNBATOTAL", "KXNBASPREAD", "KXNBAPTS",
-                    "KXWNBAGAME", "KXWNBATOTAL", "KXWNBASPREAD", "KXWNBAPTS"],
-            "nfl": ["KXNFLGAME", "KXNFLTOTAL", "KXNFLSPREAD"],
-            "nhl": ["KXNHLGAME", "KXNHLTOTAL", "KXNHLSPREAD"],
-            "soccer": ["KXWCGAME", "KXWCTOTAL", "KXWCSPREAD", "KXWCBTTS",
-                       "KXWCGOAL", "KXSOCEPL", "KXSOCUCL"],
-            "world_cup": ["KXWCGAME", "KXWCTOTAL", "KXWCSPREAD", "KXWCBTTS", "KXWCGOAL"],
+            # NO SPREAD MARKETS — rule trader only knows score diff, not final margin
+            "mlb": ["KXMLBGAME", "KXMLBTOTAL"],
+            "nba": ["KXWNBAGAME", "KXWNBATOTAL"],
+            "nfl": ["KXNFLGAME"],
+            "nhl": ["KXNHLGAME"],
+            "soccer": ["KXWCGAME", "KXWCTOTAL", "KXWCBTTS", "KXWCGOAL"],
+            "world_cup": ["KXWCGAME", "KXWCTOTAL", "KXWCBTTS", "KXWCGOAL"],
             # PGA — all tournament markets
             "pga": ["KXPGATOUR",      # Tournament winner
                     "KXPGATOP5",       # Top 5 finish
@@ -814,10 +812,20 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
             if not target_market or best_score < 0.4:
                 log.info("Rule trader: no confident Kalshi match for %s (best=%.2f)",
                          game_id, best_score)
+                # Set a short cooldown so we don't spam this every 20s
+                _game_cooldowns[game_id] = now - GAME_COOLDOWN_SECONDS + 120  # retry in 2 min
                 continue
 
         ticker = target_market.get("ticker", "")
         if not ticker:
+            continue
+
+        # Hard block — never bet spreads, player props, or exotic markets
+        # Rule trader only knows if a team is winning, not by how many runs
+        blocked_series = ["SPREAD", "HIT", "HR", "KS", "HRR", "TB", "RFI",
+                          "GOAL", "PTS", "3BALL", "BIRDIE", "EAGLE"]
+        if any(b in ticker.upper() for b in blocked_series):
+            log.debug("Rule trader: blocking %s (spread/prop market)", ticker[:40])
             continue
 
         # Skip if this is a parlay ticker or extracted leg from a parlay
@@ -834,7 +842,8 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
         # Skip if no real market question
         question = target_market.get("question", target_market.get("title", ""))
         if not question or question == "?":
-            log.info("Rule trader: no real market question for %s", game_id)
+            log.info("Rule trader: no real market question for %s — skipping", game_id)
+            _game_cooldowns[game_id] = now - GAME_COOLDOWN_SECONDS + 120
             continue
 
         # Skip if this is a parlay leg (can't order individually)
