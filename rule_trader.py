@@ -644,6 +644,12 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
         log.debug("Rule trader: daily limit (%d) reached", MAX_DAILY_RULE_TRADES)
         return 0
 
+    # Stop trading if balance is critically low
+    bankroll = state.get("bankroll", 25.0)
+    if bankroll < 2.00:
+        log.warning("Rule trader: balance $%.2f too low to trade safely — stopping", bankroll)
+        return 0
+
     for game in live_games:
         if not game.get("is_live"):
             continue
@@ -991,7 +997,8 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
                     price=market_price,
                     your_size=size_usdc,
                     conviction=1,
-                    num_wallets=1,
+                    trader_bankroll=state.get("bankroll", 25.0),
+                    usdc_size=size_usdc,
                 )
                 if decision.get("decision") == "SKIP":
                     log.info(
