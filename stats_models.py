@@ -501,7 +501,7 @@ def format_game_context(game: dict) -> str:
     """
     sport = game.get("sport", "")
     teams = game.get("teams", [])
-    scores = game.get("scores", [0, 0])
+    scores = [float(t.get("score", 0) or 0) for t in game.get("teams", [])] or [0, 0]
     period = game.get("period", 0)
     clock = game.get("clock", "")
 
@@ -601,7 +601,7 @@ def evaluate_signal(game: dict, market_price: float,
     """
     sport = game.get("sport", "")
     teams = game.get("teams", [])
-    scores = game.get("scores", [0, 0])
+    scores = [float(t.get("score", 0) or 0) for t in game.get("teams", [])] or [0, 0]
     period = game.get("period", 0)
     clock = game.get("clock", "")
 

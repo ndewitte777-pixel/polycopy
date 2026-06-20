@@ -761,9 +761,24 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
 
                 if market_type == "TOTAL" and any(w in q for w in ["over", "under", "total", "goals", "runs", "points", "winner"]):
                     import re as _re2
-                    # Extract line from ticker suffix e.g. KXMLBTOTAL-26JUN192145MINAZ-9 → 9
                     ticker_line_match = _re2.search(r'-(\d+\.?\d*)$', ticker)
                     line_val = float(ticker_line_match.group(1)) if ticker_line_match else 999
+
+                    current_total = sum(
+                        float(t.get("score", 0) or 0)
+                        for t in game.get("teams", [])
+                    )
+
+                    # Skip if betting OVER and line already beaten — market is at 0.99
+                    # or betting UNDER and line already beaten — market is at 0.01
+                    if bet_side == "OVER" and line_val <= current_total:
+                        log.debug("Skip OVER %s — line %.1f already beaten (%d runs)",
+                                  ticker, line_val, current_total)
+                        continue
+                    if bet_side == "UNDER" and line_val <= current_total:
+                        log.debug("Skip UNDER %s — line %.1f already beaten (%d runs)",
+                                  ticker, line_val, current_total)
+                        continue
 
                     # Skip impossible lines
                     max_total = {
@@ -774,7 +789,6 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
                         continue
 
                     # Prefer line closest to current score + ~2 more runs
-                    current_total = sum(game.get("scores", [0, 0]))
                     target_line = current_total + 2
                     proximity = 1 / (1 + abs(line_val - target_line))
                     match_score += 0.25 + proximity * 0.15
@@ -923,6 +937,49 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
         size_usdc = max(size_usdc, MIN_BET_SIZE)
 
         kalshi_side = "YES" if bet_side in ("YES", "HOME", "OVER") else "NO"
+
+        # For WIN markets, adjust side based on which team is in the Kalshi ticker
+        # Kalshi WIN tickers ask "Will [team1] win?" where team1 is first in ticker
+        # e.g. KXMLBGAME-26JUN192210BOSSEA-SEA asks "Will SEA win?" (SEA is the YES side)
+        # Wait — actually the ticker team_part is BOSSEA, and the suffix -SEA means SEA is yes
+        # Let's check the market question to determine yes side
+        if market_type == "WIN" and ticker and target_market:
+            q_lower = (target_market.get("question") or
+                       target_market.get("title") or "").lower()
+            # The team we want to win
+            win_team = team or ""
+            win_team_lower = win_team.lower()
+
+            # Check if our winning team is the YES side in this market
+            # "Will Boston win?" → YES = Boston wins
+            # If our signal is for Boston to win, we want YES
+            teams_in_game = game.get("teams", [])
+            leader_team = None
+            for t in teams_in_game:
+                abbr = t.get("abbreviation", "").upper()
+                aliases = {"ARI": ["AZ"], "OAK": ["ATH"]}.get(abbr, [abbr])
+                if any(a in ticker_team_part for a in aliases):
+                    if bet_side == "HOME" and t.get("home_away") == "home":
+                        leader_team = t
+                    elif bet_side == "AWAY" and t.get("home_away") == "away":
+                        leader_team = t
+
+            if leader_team:
+                leader_abbr = leader_team.get("abbreviation", "").upper()
+                leader_aliases = {"ARI": ["AZ"], "OAK": ["ATH"]}.get(
+                    leader_abbr, [leader_abbr])
+                # Find where in the ticker the leader appears
+                # KXMLBGAME-26JUN192210BOSSEA: BOS is first, SEA is second
+                # Kalshi market question: "Will BOS win?" → YES=BOS, NO=SEA
+                # Or it might be "New York M vs Philadelphia Winner?" → YES=first team
+                if ticker_team_part:
+                    half = len(ticker_team_part) // 2
+                    first_half = ticker_team_part[:half+1]
+                    second_half = ticker_team_part[half:]
+                    leader_in_first = any(a in first_half for a in leader_aliases)
+                    kalshi_side = "yes" if leader_in_first else "no"
+                    log.debug("WIN side: leader=%s ticker=%s → %s",
+                              leader_abbr, ticker_team_part, kalshi_side)
 
         # --- Claude filter on rule trades ---
         # Ask Claude to review before placing any real money
