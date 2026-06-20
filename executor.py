@@ -136,7 +136,9 @@ class Executor:
 
     def _place_kalshi_order(self, ticker: str, side: str, price: float,
                              size_usdc: float) -> dict:
-        import uuid
+        import uuid, base64, time as _t, requests as _rq
+        import os
+
         kalshi_side = "yes" if side.upper() in ("BUY", "YES") else "no"
 
         # Fetch real current market price
@@ -150,35 +152,75 @@ class Executor:
         except Exception as e:
             log.debug("Could not fetch real price for %s: %s", ticker, e)
 
-        # Skip extreme odds
         if price < 0.05 or price > 0.95:
             log.info("Skipping extreme odds %.2f for %s", price, ticker)
-            return {"skipped": True, "reason": f"extreme_odds_{price:.2f}"}
+            return {"skipped": True}
 
-        # Price in cents (1-99), count = contracts
         price_cents = max(5, min(95, int(round(price * 100))))
         count = max(1, int(size_usdc / price)) if price > 0 else 1
+        client_order_id = str(uuid.uuid4())
+
+        # Use direct REST API — SDK has inconsistent call signature
+        api_key = os.environ.get("KALSHI_API_KEY_ID", "")
+        private_key_pem = os.environ.get("KALSHI_PRIVATE_KEY", "")
+        base = "https://api.elections.kalshi.com/trade-api/v2"
+        path = "/trade-api/v2/portfolio/orders"
 
         try:
-            from kalshi_python.models import CreateOrderRequest
-            order = CreateOrderRequest(
-                ticker=ticker,
-                action="buy",
-                type="limit",
-                side=kalshi_side,
-                yes_price=price_cents if kalshi_side == "yes" else None,
-                no_price=price_cents if kalshi_side == "no" else None,
-                count=count,
-                client_order_id=str(uuid.uuid4()),
+            from cryptography.hazmat.primitives.serialization import load_pem_private_key
+            from cryptography.hazmat.primitives import hashes
+            from cryptography.hazmat.primitives.asymmetric import padding as _pad
+            pem = private_key_pem.strip()
+            if not pem.startswith("-----"):
+                pem = f"-----BEGIN PRIVATE KEY-----\n{pem}\n-----END PRIVATE KEY-----"
+            elif "\\n" in pem:
+                pem = pem.replace("\\n", "\n")
+            key = load_pem_private_key(pem.encode(), password=None)
+            ts = str(int(_t.time() * 1000))
+            sig = key.sign(
+                (ts + "POST" + path).encode(),
+                _pad.PSS(mgf=_pad.MGF1(hashes.SHA256()),
+                         salt_length=_pad.PSS.MAX_LENGTH),
+                hashes.SHA256(),
             )
-            resp = self.client.create_order(create_order_request=order)
-            result = resp.to_dict() if hasattr(resp, "to_dict") else {}
-            status = result.get("order", {}).get("status", "unknown")
-            log.info("Kalshi order placed: status=%s ticker=%s price=%dc count=%d",
-                     status, ticker, price_cents, count)
-            return result
+            headers = {
+                "KALSHI-ACCESS-KEY": api_key,
+                "KALSHI-ACCESS-TIMESTAMP": ts,
+                "KALSHI-ACCESS-SIGNATURE": base64.b64encode(sig).decode(),
+                "Content-Type": "application/json",
+            }
         except Exception as e:
-            log.error("Kalshi order failed: %s", e)
+            log.error("Auth header error: %s", e)
+            return {"error": str(e)}
+
+        body = {
+            "ticker": ticker,
+            "client_order_id": client_order_id,
+            "action": "buy",
+            "type": "limit",
+            "side": kalshi_side,
+            "count": count,
+            "yes_price": price_cents if kalshi_side == "yes" else None,
+            "no_price": price_cents if kalshi_side == "no" else None,
+        }
+        # Remove None values
+        body = {k: v for k, v in body.items() if v is not None}
+
+        try:
+            r = _rq.post(f"{base}/portfolio/orders",
+                         headers=headers, json=body, timeout=10)
+            if r.status_code in (200, 201):
+                data = r.json()
+                order = data.get("order", {})
+                status = order.get("status", "unknown")
+                log.info("Order placed: status=%s ticker=%s price=%dc count=%d",
+                         status, ticker, price_cents, count)
+                return {"order": order}
+            else:
+                log.error("Order REST failed %d: %s", r.status_code, r.text[:300])
+                return {"error": r.text[:200]}
+        except Exception as e:
+            log.error("Order request failed: %s", e)
             return {"error": str(e)}
 
     def _place_kalshi_order_sdk(self, ticker: str, side: str, price: float,
