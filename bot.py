@@ -602,7 +602,8 @@ def process_activity_item(data_api: DataAPI, executor: Executor, state: dict,
         wt.record_trade_placed(state, wallet, trade_token_id, price, your_size)
 
         notifier.notify_trade_opened(
-            wallet, side, market_info, price, your_size, DRY_RUN, conviction
+            wallet, side, market_info, price, your_size, DRY_RUN, conviction,
+            claude_reason=ai_decision.get("reason", ""),
         )
 
     # --- Execute SELL (copied from target) ---

@@ -43,13 +43,14 @@ def send(title: str, message: str, priority: int = 0):
 
 
 def notify_trade_opened(wallet, side, market_info: dict, price, size_usdc,
-                        dry_run, conviction: int = 1):
+                        dry_run, conviction: int = 1, claude_reason: str = ""):
     prefix = "[DRY RUN] " if dry_run else ""
     question = market_info.get("question", "Unknown market")
     outcome = market_info.get("outcome", "?")
     end_date = market_info.get("end_date", "")
     url = market_info.get("url", "")
     conv_str = f" 🔥 {conviction} traders agree!" if conviction >= 2 else ""
+    claude_str = f"\n\n✅ Claude: {claude_reason}" if claude_reason else ""
     send(
         title=f"{prefix}{'📈' if side == 'BUY' else '📉'} {side}: {outcome}{conv_str}",
         message=(
@@ -59,6 +60,7 @@ def notify_trade_opened(wallet, side, market_info: dict, price, size_usdc,
             f"Trader: {wallet[:8]}...\n"
             f"Closes: {end_date or 'unknown'}\n"
             f"{url}"
+            f"{claude_str}"
         ),
     )
 

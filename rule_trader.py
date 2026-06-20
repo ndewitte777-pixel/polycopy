@@ -968,6 +968,8 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
                         break
 
         # --- Claude filter on rule trades ---
+        claude_reason = "filter disabled"
+        claude_confidence = 0
         # Ask Claude to review before placing any real money
         try:
             import claude_filter as _cf
@@ -999,19 +1001,29 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
                         decision.get("reason", ""),
                     )
                     continue
-                # Adjust size based on Claude's suggestion
-                size_pct = decision.get("suggested_size_pct", 100)
-                if size_pct < 100:
-                    size_usdc = size_usdc * (size_pct / 100)
+                # Store Claude's approval reason for notification
+                claude_confidence = decision.get("confidence", 0)
+                claude_reason = decision.get("reason", "")
+                claude_size_pct = decision.get("suggested_size_pct", 100)
+                if claude_size_pct < 100:
+                    size_usdc = size_usdc * (claude_size_pct / 100)
                     size_usdc = max(size_usdc, MIN_BET_SIZE)
+                log.info("Claude APPROVED: conf=%d | %s", claude_confidence, claude_reason[:80])
         except Exception as e:
             log.debug("Claude filter error in rule trader: %s — proceeding", e)
+            claude_confidence = 0
+            claude_reason = "filter error — proceeding on rules"
 
         log.info(
-            "RULE TRADE | %s | %s %s | conf=%d | $%.2f\n  %s\n  Market: %s",
+            "RULE TRADE | %s | %s %s | rule_conf=%d | claude_conf=%d | $%.2f\n"
+            "  Rule: %s\n"
+            "  Market: %s\n"
+            "  Claude: %s",
             game.get("short_name", "?"), market_type, bet_side,
-            confidence, size_usdc, reason,
+            confidence, claude_confidence, size_usdc,
+            reason,
             target_market.get("question", "?")[:70],
+            claude_reason[:120] if claude_reason else "n/a",
         )
 
         resp = executor.place_order(
@@ -1050,13 +1062,12 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
         entries += 1
 
         notifier.send(
-            title=f"📊 RULE {market_type} | {bet_side} | {game.get('short_name','?')}",
+            title=f"📊 RULE {market_type} | {kalshi_side} | {game.get('short_name','?')}",
             message=(
                 f"{target_market.get('question','?')}\n\n"
-                f"Bet: {kalshi_side} @ {market_price:.3f}\n"
-                f"Rule confidence: {confidence}%\n"
-                f"Size: ${size_usdc:.2f}\n\n"
-                f"{reason}"
+                f"Bet: {kalshi_side} @ {market_price:.2f} | Size: ${size_usdc:.2f}\n"
+                f"Rule: {reason}\n\n"
+                f"✅ Claude ({claude_confidence}%): {claude_reason}"
             ),
         )
 
