@@ -164,7 +164,7 @@ class Executor:
         api_key = os.environ.get("KALSHI_API_KEY_ID", "")
         private_key_pem = os.environ.get("KALSHI_PRIVATE_KEY", "")
         base = "https://api.elections.kalshi.com/trade-api/v2"
-        path = "/trade-api/v2/portfolio/orders"
+        path = "/trade-api/v2/portfolio/events/orders"
 
         try:
             from cryptography.hazmat.primitives.serialization import load_pem_private_key
@@ -196,28 +196,40 @@ class Executor:
         body = {
             "ticker": ticker,
             "client_order_id": client_order_id,
-            "action": "buy",
-            "type": "limit",
-            "side": kalshi_side,
-            "count": count,
-            "yes_price": price_cents if kalshi_side == "yes" else None,
-            "no_price": price_cents if kalshi_side == "no" else None,
+            "side": "bid" if kalshi_side == "yes" else "ask",
+            "count": str(count),
+            "price": f"{price:.4f}",  # fixed-point dollars e.g. "0.5600"
+            "time_in_force": "good_till_canceled",
+            "self_trade_prevention_type": "taker_at_cross",
         }
-        # Remove None values
-        body = {k: v for k, v in body.items() if v is not None}
+
+        path = "/trade-api/v2/portfolio/events/orders"
+        base = "https://api.elections.kalshi.com/trade-api/v2"
 
         try:
-            r = _rq.post(f"{base}/portfolio/orders",
+            r = _rq.post(f"{base}/portfolio/events/orders",
                          headers=headers, json=body, timeout=10)
             if r.status_code in (200, 201):
                 data = r.json()
-                order = data.get("order", {})
-                status = order.get("status", "unknown")
-                log.info("Order placed: status=%s ticker=%s price=%dc count=%d",
-                         status, ticker, price_cents, count)
-                return {"order": order}
+                fill_count = data.get("fill_count", "0")
+                remaining = data.get("remaining_count", "0")
+                avg_price = data.get("average_fill_price", f"{price:.4f}")
+                order_id = data.get("order_id", "")
+                status = "executed" if float(fill_count or 0) > 0 else "resting"
+                log.info("V2 order: filled=%s remaining=%s avg=%.3f ticker=%s",
+                         fill_count, remaining, float(avg_price or price), ticker)
+                return {
+                    "order": {
+                        "order_id": order_id,
+                        "ticker": ticker,
+                        "side": kalshi_side,
+                        "status": status,
+                        "fill_count": fill_count,
+                        "remaining_count": remaining,
+                    }
+                }
             else:
-                log.error("Order REST failed %d: %s", r.status_code, r.text[:300])
+                log.error("V2 order failed %d: %s", r.status_code, r.text[:300])
                 return {"error": r.text[:200]}
         except Exception as e:
             log.error("Order request failed: %s", e)
