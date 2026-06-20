@@ -282,7 +282,7 @@ def _extract_event_tickers(markets: list) -> set:
 
 _single_game_cache: list = []
 _single_game_cache_time: float = 0.0
-_SINGLE_GAME_CACHE_TTL = 180  # refresh every 3 minutes
+_SINGLE_GAME_CACHE_TTL = 120  # refresh every 2 minutes
 
 
 def get_single_game_markets(parlay_markets: list) -> list:
@@ -347,18 +347,40 @@ def get_single_game_markets(parlay_markets: list) -> list:
 
     log.info("Found %d individual event tickers in parlay bundles", len(event_tickers))
 
-    # Skip non-sports series
-    SKIP_SERIES = {"KXBTCD", "KXBTC15M", "KXETHD", "KXETH15M", "KXSOLD",
-                   "KXSOL15M", "KXXRPD", "KXXRP15M", "KXDOGE15M", "KXNASDAQ"}
+    # Only fetch sports markets we actually trade on
+    # Skip props (HR, HIT, KS), spreads, crypto
+    ALLOWED_SERIES = {
+        "KXMLBGAME",    # MLB winner
+        "KXMLBTOTAL",   # MLB total runs
+        "KXWCGAME",     # World Cup winner
+        "KXWCTOTAL",    # World Cup total goals
+        "KXWCBTTS",     # Both teams score
+        "KXWNBAGAME",   # WNBA winner
+        "KXWNBATOTAL",  # WNBA total points
+        "KXNBAGAME",    # NBA winner
+        "KXNBATOTAL",   # NBA total
+        "KXNFLGAME",    # NFL winner
+        "KXNHLTOTAL",   # NHL total
+        "KXNHLGAME",    # NHL winner
+        "KXUFCFIGHT",   # UFC fight winner
+        "KXPGATOUR",    # PGA tournament winner
+        "KXPGATOP5",    # PGA top 5
+        "KXPGATOP10",   # PGA top 10
+        "KXPGATOP20",   # PGA top 20
+        "KXPGAMAKECUT", # PGA make cut
+        "KXPGAR1LEAD",  # PGA round leader
+        "KXATPMATCH",   # Tennis match winner
+        "KXWTAMATCH",   # WTA match winner
+    }
 
-    # Group event tickers by series
+    # Group event tickers by series — only allowed series
     series_events: dict = {}
     for t in event_tickers:
         s = t.split("-")[0]
-        if s not in SKIP_SERIES:
+        if s in ALLOWED_SERIES:
             series_events.setdefault(s, []).append(t)
 
-    log.info("Unique series: %s", sorted(series_events.keys()))
+    log.info("Fetching series: %s", sorted(series_events.keys()))
 
     api = _get_api()
     if not api:
@@ -368,14 +390,12 @@ def get_single_game_markets(parlay_markets: list) -> list:
     all_markets = []
     seen = set()
 
-    # Fetch markets for each known event ticker (not the whole series)
-    # This ensures we only get markets that are in active parlay bundles = current
-    for series, events in sorted(series_events.items())[:25]:
+    for series, events in sorted(series_events.items()):
         fetched = 0
-        for event_ticker in events[:20]:  # max 20 events per series
+        for event_ticker in events[:30]:  # max 30 events per series
             try:
                 resp = api.get_markets(event_ticker=event_ticker,
-                                       status="open", limit=20)
+                                       status="open", limit=10)
                 if hasattr(resp, "markets") and resp.markets:
                     mkts = [m.to_dict() if hasattr(m, "to_dict") else m
                             for m in resp.markets]
