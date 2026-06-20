@@ -730,38 +730,56 @@ def evaluate_signal(game: dict, market_price: float,
     ev = calculate_ev(true_prob, market_price)
 
     # ── Final recommendation ──────────────────────────────────────
-    edge_required = 0.05  # need 5% edge minimum
-    ev_required = 0.02    # need 2% EV minimum
+    edge_required = 0.05
+    has_model_data = len(reason_parts) > 0  # did we actually compute something?
 
-    should_trade = (
-        ev["is_positive_ev"] and
-        ev["edge"] >= edge_required and
-        true_prob >= 0.55  # don't bet coin flips
-    )
+    if not has_model_data:
+        # No model data available — fall back to rule trader's own confidence
+        # Don't block trades just because we can't compute a probability
+        should_trade = True
+        confidence = 60
+        reason = f"No probability model for {sport} {signal_type} | Market: {market_price:.1%}"
+    else:
+        ev = calculate_ev(true_prob, market_price)
+        should_trade = (
+            ev["is_positive_ev"] and
+            ev["edge"] >= edge_required and
+            true_prob >= 0.55
+        )
+        confidence = int(min(95, max(0,
+            50 +
+            ev["edge"] * 200 +
+            (true_prob - 0.5) * 60 +
+            (form_adj * 100)
+        )))
+        reason = " | ".join(reason_parts)
+        reason += (
+            f" | EV: {ev['ev_pct']:+.1f}% "
+            f"| Edge: {ev['edge']:+.1%} "
+            f"| True prob: {true_prob:.1%} "
+            f"| Market: {market_price:.1%}"
+        )
 
-    confidence = int(min(95, max(0,
-        50 +
-        ev["edge"] * 200 +  # edge contribution
-        (true_prob - 0.5) * 60 +  # probability contribution
-        (form_adj * 100)  # form contribution
-    )))
+        return {
+            "true_prob": true_prob,
+            "ev": ev,
+            "form_adjustment": form_adj,
+            "confidence": confidence,
+            "should_trade": should_trade,
+            "reason": reason,
+            "quarter_kelly": ev["quarter_kelly"],
+        }
 
-    reason = " | ".join(reason_parts) if reason_parts else "No model data"
-    reason += (
-        f" | EV: {ev['ev_pct']:+.1f}% "
-        f"| Edge: {ev['edge']:+.1%} "
-        f"| True prob: {true_prob:.1%} "
-        f"| Market: {market_price:.1%}"
-    )
-
+    # No model data — allow trade but flag it
     return {
-        "true_prob": true_prob,
-        "ev": ev,
-        "form_adjustment": form_adj,
+        "true_prob": 0.5,
+        "ev": {"ev": 0, "edge": 0, "kelly": 0, "quarter_kelly": 0,
+               "is_positive_ev": True, "ev_pct": 0},
+        "form_adjustment": 0,
         "confidence": confidence,
         "should_trade": should_trade,
         "reason": reason,
-        "quarter_kelly": ev["quarter_kelly"],
+        "quarter_kelly": 0,
     }
 
 

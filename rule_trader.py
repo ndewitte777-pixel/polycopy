@@ -138,6 +138,7 @@ def _soccer_rules(game: dict) -> list[dict]:
                 "team": None,
                 "confidence": min(78, 60 + int(total_goals * 5)),
                 "reason": f"{total_goals} goals in {elapsed:.0f}min ({goals_per_90:.1f}/90 pace) — OVER likely",
+                "preferred_line": 2.5,   # only match OVER 2.5, not 3.5+
             })
 
     return signals
@@ -759,8 +760,44 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
                 match_score = match_game_to_market(game, q, ticker)
 
                 if market_type == "TOTAL" and any(w in q for w in ["over", "under", "total", "goals", "runs", "points"]):
-                    match_score += 0.25
+                    # Check if this market's line matches our preferred line
+                    import re as _re
+                    line_match = _re.search(r'(\d+\.?\d*)\s*(goal|run|point|total)', q)
+                    preferred = best.get("preferred_line", 0)
+                    if line_match and preferred:
+                        line_val = float(line_match.group(1))
+                        # Max realistic totals by sport
+                        max_total = {
+                            "soccer": 2.5, "world_cup": 2.5,
+                            "mlb": 9.5, "nba": 225.5, "nhl": 5.5,
+                        }.get(sport, 5.5)
+                        if line_val > max_total:
+                            log.debug("Skip total %.1f (max %.1f) for %s",
+                                     line_val, max_total, ticker)
+                            continue
+                        # Boost score if line matches preferred
+                        if abs(line_val - preferred) <= 0.5:
+                            match_score += 0.4
+                        else:
+                            match_score += 0.15
+                    else:
+                        match_score += 0.25
                 elif market_type == "SPREAD" and "spread" in q:
+                    # Filter spread lines — only realistic margins
+                    # Extract the number from question e.g. "wins by more than 3.5" → 3.5
+                    import re as _re
+                    line_match = _re.search(r'(\d+\.?\d*)\s*(goal|run|point)', q)
+                    if line_match:
+                        line_val = float(line_match.group(1))
+                        # Max spread lines by sport
+                        max_spread = {
+                            "soccer": 1.5, "world_cup": 1.5, "epl": 1.5,
+                            "mlb": 1.5, "nba": 6.5, "nfl": 7.5, "nhl": 1.5,
+                        }.get(sport, 2.5)
+                        if line_val > max_spread:
+                            log.debug("Skip spread %.1f (max %.1f) for %s",
+                                     line_val, max_spread, ticker)
+                            continue  # skip this market, too big a spread
                     match_score += 0.25
                 elif market_type == "WIN" and not any(w in q for w in ["spread", "over", "under", "total", "goal", "hit", "strikeout"]):
                     match_score += 0.15
