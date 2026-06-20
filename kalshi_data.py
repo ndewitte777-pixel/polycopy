@@ -347,10 +347,16 @@ def get_single_game_markets(parlay_markets: list) -> list:
 
     log.info("Found %d individual event tickers in parlay bundles", len(event_tickers))
 
-    # Get unique series prefixes
+    # Get unique series prefixes — skip non-sports series
+    SKIP_SERIES = {"KXBTCD", "KXBTC15M", "KXETHD", "KXETH15M", "KXSOLD",
+                   "KXSOL15M", "KXXRPD", "KXXRP15M", "KXDOGE15M",
+                   "KXSOLD", "KXNASDAQ", "KXSPY"}  # crypto/finance — not sports
+
     series_set = set()
     for t in event_tickers:
-        series_set.add(t.split("-")[0])
+        s = t.split("-")[0]
+        if s not in SKIP_SERIES:
+            series_set.add(s)
 
     log.info("Unique series: %s", sorted(series_set))
 
@@ -359,46 +365,48 @@ def get_single_game_markets(parlay_markets: list) -> list:
         log.warning("No Kalshi API available for single game market fetch")
         return []
 
+    from datetime import datetime, timezone, timedelta
+    now_utc = datetime.now(timezone.utc)
+    cutoff = now_utc + timedelta(days=7)  # only fetch markets closing within 7 days
+
     session = _rq.Session()
     all_markets = []
     seen = set()
 
-    for series in sorted(series_set)[:25]:  # up to 25 series
+    for series in sorted(series_set)[:25]:
         try:
-            # Fetch ALL markets for this series using series_ticker
             fetched = 0
-            cursor = None
-            while True:
-                try:
-                    kwargs = {"series_ticker": series, "status": "open", "limit": 100}
-                    if cursor:
-                        kwargs["cursor"] = cursor
-                    resp = api.get_markets(**kwargs)
-                    if not hasattr(resp, "markets") or not resp.markets:
-                        break
+            try:
+                resp = api.get_markets(series_ticker=series, status="open", limit=100)
+                if hasattr(resp, "markets") and resp.markets:
                     mkts = [m.to_dict() if hasattr(m, "to_dict") else m
                             for m in resp.markets]
                     for m in mkts:
                         ticker = m.get("ticker", "")
-                        if ticker and ticker not in seen:
-                            seen.add(ticker)
-                            all_markets.append(m)
-                    fetched += len(mkts)
-                    # Check for next page
-                    cursor = getattr(resp, "cursor", None)
-                    if not cursor or len(mkts) < 100:
-                        break
-                except TypeError:
-                    # SDK doesn't support series_ticker — fall back to event loop
-                    break
+                        if not ticker or ticker in seen:
+                            continue
+                        # Filter by close time — only next 7 days
+                        close_str = m.get("close_time", "") or m.get("expiration_time", "")
+                        if close_str:
+                            try:
+                                close_dt = datetime.fromisoformat(
+                                    close_str.replace("Z", "+00:00"))
+                                if close_dt > cutoff:
+                                    continue  # too far out
+                            except Exception:
+                                pass
+                        seen.add(ticker)
+                        all_markets.append(m)
+                        fetched += 1
+                    if fetched > 0:
+                        log.info("  Got %d markets for series %s via SDK", fetched, series)
+                        continue
+            except Exception as e:
+                log.debug("series_ticker failed for %s: %s", series, e)
 
-            if fetched > 0:
-                log.info("  Got %d markets for series %s via SDK", fetched, series)
-                continue
-
-            # Fall back: fetch each individual event ticker for this series
+            # Fall back: fetch by individual event tickers for this series
             series_events = [t for t in event_tickers if t.split("-")[0] == series]
-            for event_ticker in series_events[:15]:  # max 15 events per series
+            for event_ticker in series_events[:10]:
                 try:
                     resp = api.get_markets(event_ticker=event_ticker,
                                           status="open", limit=20)
@@ -410,7 +418,7 @@ def get_single_game_markets(parlay_markets: list) -> list:
                             if ticker and ticker not in seen:
                                 seen.add(ticker)
                                 all_markets.append(m)
-                        fetched += len(mkts)
+                                fetched += 1
                 except Exception:
                     pass
             if fetched > 0:
