@@ -915,6 +915,8 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
         # Enforce minimum bet size — no tiny bets
         size_usdc = max(size_usdc, MIN_BET_SIZE)
 
+        kalshi_side = "YES" if bet_side in ("YES", "HOME", "OVER") else "NO"
+
         # --- Claude filter on rule trades ---
         # Ask Claude to review before placing any real money
         try:
