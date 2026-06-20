@@ -268,8 +268,8 @@ def _mlb_rules(game: dict) -> list[dict]:
                       f"in inning {period}",
         })
 
-    # Rule: High run pace → OVER (only fire after inning 5)
-    if period >= 5 and total_runs >= 8:
+    # Rule: High run pace → OVER (only fire after inning 5, before inning 9)
+    if 5 <= period <= 8 and total_runs >= 8:
         pace = total_runs / period * 9
         signals.append({
             "market_type": "TOTAL",
@@ -277,16 +277,18 @@ def _mlb_rules(game: dict) -> list[dict]:
             "team": None,
             "confidence": min(75, 60 + int(total_runs)),
             "reason": f"{total_runs} runs through {period} innings ({pace:.1f}/9 pace) — OVER likely",
+            "preferred_line": 8.5,
         })
 
-    # Rule: Low scoring game → UNDER (only fire after inning 6)
-    if period >= 6 and total_runs <= 1:
+    # Rule: Low scoring → UNDER (only fire after inning 6, before inning 9)
+    if 6 <= period <= 8 and total_runs <= 1:
         signals.append({
             "market_type": "TOTAL",
             "bet_side": "UNDER",
             "team": None,
             "confidence": 72,
             "reason": f"Only {total_runs} runs through {period} innings — UNDER likely",
+            "preferred_line": 7.5,
         })
 
     return signals
