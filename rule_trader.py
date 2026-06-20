@@ -938,41 +938,34 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
 
         kalshi_side = "YES" if bet_side in ("YES", "HOME", "OVER") else "NO"
 
-        # For WIN markets, check the question to determine which side to bet
-        # "Will Boston win?" → YES=Boston, NO=Seattle
-        # We need to know if the team we want to win is the YES side
-        if market_type == "WIN" and ticker and target_market:
+        # For WIN markets, the ticker suffix tells us who YES is
+        # e.g. KXMLBGAME-26JUN202210BOSSEA-SEA → suffix=SEA → YES=SEA wins
+        # e.g. KXMLBGAME-26JUN202205LAAATH-LAA → suffix=LAA → YES=LAA wins
+        if market_type == "WIN" and ticker:
             import re as _re_win
-            q = (target_market.get("question") or
-                 target_market.get("title") or "").lower()
-            teams_in_game = game.get("teams", [])
+            suffix_match = _re_win.search(r'-([A-Z]{2,4})$', ticker.upper())
+            if suffix_match:
+                yes_team_code = suffix_match.group(1)  # e.g. "LAA", "SEA", "BOS"
 
-            # Find the leading team based on bet_side
-            leader_team = None
-            for t in teams_in_game:
-                if bet_side == "HOME" and t.get("home_away") == "home":
-                    leader_team = t
-                elif bet_side == "AWAY" and t.get("home_away") == "away":
-                    leader_team = t
+                # Find which team in the game matches this code
+                teams_in_game = game.get("teams", [])
+                ALIASES = {"ARI": ["AZ"], "OAK": ["ATH"], "AZ": ["ARI"], "ATH": ["OAK"]}
 
-            if leader_team:
-                leader_name = (leader_team.get("name") or "").lower()
-                leader_abbr = leader_team.get("abbreviation", "").upper()
-                leader_words = [w for w in leader_name.split() if len(w) > 3]
-
-                # Check if leader appears in question (YES side)
-                # "Will Boston win?" → "boston" in q → leader is YES
-                leader_in_q = (any(w in q for w in leader_words) or
-                               leader_abbr.lower() in q)
-
-                if leader_in_q:
-                    kalshi_side = "yes"
-                else:
-                    # Leader is the NO side (market asks about opponent)
-                    kalshi_side = "no"
-
-                log.debug("WIN side: %s %s → kalshi_side=%s (q='%s')",
-                          leader_abbr, bet_side, kalshi_side, q[:50])
+                for t in teams_in_game:
+                    abbr = t.get("abbreviation", "").upper()
+                    codes = [abbr] + ALIASES.get(abbr, [])
+                    if yes_team_code in codes:
+                        # This team is the YES side
+                        # Do we want this team to win?
+                        team_home_away = t.get("home_away", "")
+                        if (bet_side == "HOME" and team_home_away == "home") or \
+                           (bet_side == "AWAY" and team_home_away == "away"):
+                            kalshi_side = "yes"  # YES team is our pick
+                        else:
+                            kalshi_side = "no"   # YES team is NOT our pick
+                        log.debug("WIN side: YES=%s pick=%s %s → %s",
+                                  yes_team_code, abbr, bet_side, kalshi_side)
+                        break
 
         # --- Claude filter on rule trades ---
         # Ask Claude to review before placing any real money
