@@ -585,7 +585,8 @@ def format_game_context(game: dict) -> str:
 
 def evaluate_signal(game: dict, market_price: float,
                     signal_type: str, signal_side: str,
-                    session: requests.Session = None) -> dict:
+                    session: requests.Session = None,
+                    spread_line: float = 1.5) -> dict:
     """
     Full statistical evaluation of a trading signal.
 
@@ -631,6 +632,17 @@ def evaluate_signal(game: dict, market_price: float,
                 f"(projected {total.get('projected_total', '?')} runs)"
             )
 
+        elif signal_type == "SPREAD":
+            sp = mlb_spread_probability(period, abs(score_diff), spread_line)
+            # When we bet on the LEADER (HOME/AWAY/COVER/YES), we want them to cover
+            # The leader covering = the "cover" probability
+            betting_leader = signal_side in ("COVER", "YES", "HOME", "AWAY")
+            true_prob = sp["cover"] if betting_leader else sp["no_cover"]
+            reason_parts.append(
+                f"MLB spread: {true_prob:.1%} to cover {spread_line} "
+                f"(current margin {int(score_diff)}, expected {sp['expected_margin']})"
+            )
+
     elif sport in ("soccer", "world_cup"):
         try:
             clock_min = int(clock.split(":")[0]) if ":" in clock else int(clock)
@@ -656,6 +668,15 @@ def evaluate_signal(game: dict, market_price: float,
                 f"({total['expected_more']:.1f} more goals expected)"
             )
 
+        elif signal_type == "SPREAD":
+            sp = soccer_spread_probability(clock_min, abs(int(score_diff)), spread_line)
+            betting_leader = signal_side in ("COVER", "YES", "HOME", "AWAY")
+            true_prob = sp["cover"] if betting_leader else sp["no_cover"]
+            reason_parts.append(
+                f"Soccer spread: {true_prob:.1%} to cover {spread_line} "
+                f"(margin {int(score_diff)} at {clock_min}')"
+            )
+
     elif sport == "nba":
         mins_per_q = 12
         mins_remaining = max(0, (4 - period) * mins_per_q +
@@ -671,6 +692,15 @@ def evaluate_signal(game: dict, market_price: float,
             total = nba_total_probability(s1 + s2, mins_remaining, 220.5)
             true_prob = total["over"] if signal_side == "OVER" else total["under"]
             reason_parts.append(f"NBA total: {true_prob:.1%} {signal_side}")
+
+        elif signal_type == "SPREAD":
+            sp = basketball_spread_probability(mins_remaining, abs(int(score_diff)), spread_line)
+            betting_leader = signal_side in ("COVER", "YES", "HOME", "AWAY")
+            true_prob = sp["cover"] if betting_leader else sp["no_cover"]
+            reason_parts.append(
+                f"NBA spread: {true_prob:.1%} to cover {spread_line} "
+                f"(margin {int(score_diff)}, {mins_remaining:.0f}min left)"
+            )
 
     elif sport == "nfl":
         mins_rem = _parse_clock(clock)
@@ -688,6 +718,15 @@ def evaluate_signal(game: dict, market_price: float,
                 f"(projected {total['projected_total']})"
             )
 
+        elif signal_type == "SPREAD":
+            sp = nfl_spread_probability(period, mins_rem, abs(int(score_diff)), spread_line)
+            betting_leader = signal_side in ("COVER", "YES", "HOME", "AWAY")
+            true_prob = sp["cover"] if betting_leader else sp["no_cover"]
+            reason_parts.append(
+                f"NFL spread: {true_prob:.1%} to cover {spread_line} "
+                f"(margin {int(score_diff)} in Q{period})"
+            )
+
     elif sport == "nhl":
         mins_rem = _parse_clock(clock)
         if signal_type == "WIN" and score_diff > 0:
@@ -702,6 +741,15 @@ def evaluate_signal(game: dict, market_price: float,
             reason_parts.append(
                 f"NHL total: {true_prob:.1%} {signal_side} "
                 f"(projected {total['projected_total']})"
+            )
+
+        elif signal_type == "SPREAD":
+            sp = nhl_spread_probability(period, mins_rem, abs(int(score_diff)), spread_line)
+            betting_leader = signal_side in ("COVER", "YES", "HOME", "AWAY")
+            true_prob = sp["cover"] if betting_leader else sp["no_cover"]
+            reason_parts.append(
+                f"NHL spread: {true_prob:.1%} to cover {spread_line} "
+                f"(margin {int(score_diff)} in P{period})"
             )
 
     elif sport in ("tennis", "tennis_atp", "tennis_wta"):
@@ -1470,3 +1518,178 @@ def ufc_win_probability(round_num: int, is_winning: bool = False,
 
     # Cap UFC confidence low — variance is extreme
     return max(0.5, min(0.72, base))
+
+
+# ─────────────────────────────────────────────
+#  SPREAD (MARGIN OF VICTORY) MODELS
+# ─────────────────────────────────────────────
+
+def mlb_spread_probability(inning: int, current_diff: int,
+                            spread_line: float) -> dict:
+    """
+    Probability the leading team wins by MORE than spread_line runs.
+
+    current_diff: current run differential (positive = leader's lead)
+    spread_line: the margin to cover (e.g. 1.5 means win by 2+)
+
+    Uses expected remaining runs and variance to project final margin.
+    """
+    innings_left = max(0, 9 - inning)
+
+    # Each team scores ~0.5 runs/inning. The margin can grow or shrink.
+    # Expected change in margin = 0 (both teams score similarly)
+    # but variance grows with innings remaining.
+    expected_final_diff = current_diff  # margin expected to hold
+
+    # Standard deviation of margin change grows with innings left
+    # Each inning adds ~variance of 1.0 to the margin
+    margin_std = math.sqrt(max(0.5, innings_left * 1.4))
+
+    # P(final_diff > spread_line)
+    if margin_std <= 0:
+        cover_prob = 1.0 if expected_final_diff > spread_line else 0.0
+    else:
+        z = (expected_final_diff - spread_line) / margin_std
+        cover_prob = _normal_cdf(z)
+
+    return {
+        "cover": round(cover_prob, 3),
+        "no_cover": round(1 - cover_prob, 3),
+        "expected_margin": round(expected_final_diff, 1),
+        "margin_std": round(margin_std, 2),
+    }
+
+
+def soccer_spread_probability(clock_min: int, current_diff: int,
+                               spread_line: float) -> dict:
+    """
+    Probability the leading soccer team wins by MORE than spread_line goals.
+    """
+    mins_left = max(0, 90 - clock_min)
+
+    # Goals are rare; margin rarely changes late
+    expected_final_diff = current_diff
+
+    # Variance from remaining goals (Poisson-ish)
+    # ~0.03 goals/min combined, margin std grows slowly
+    margin_std = math.sqrt(max(0.3, mins_left * 0.03))
+
+    if margin_std <= 0:
+        cover_prob = 1.0 if expected_final_diff > spread_line else 0.0
+    else:
+        z = (expected_final_diff - spread_line) / margin_std
+        cover_prob = _normal_cdf(z)
+
+    return {
+        "cover": round(cover_prob, 3),
+        "no_cover": round(1 - cover_prob, 3),
+        "expected_margin": round(expected_final_diff, 1),
+    }
+
+
+def basketball_spread_probability(minutes_remaining: float, current_diff: int,
+                                   spread_line: float) -> dict:
+    """
+    Probability the leading team wins by MORE than spread_line points.
+    Basketball margins are higher variance.
+    """
+    expected_final_diff = current_diff
+
+    # NBA/WNBA margin std — roughly 2 points per sqrt(minute)
+    margin_std = max(2.0, math.sqrt(max(1, minutes_remaining)) * 2.5)
+
+    if margin_std <= 0:
+        cover_prob = 1.0 if expected_final_diff > spread_line else 0.0
+    else:
+        z = (expected_final_diff - spread_line) / margin_std
+        cover_prob = _normal_cdf(z)
+
+    return {
+        "cover": round(cover_prob, 3),
+        "no_cover": round(1 - cover_prob, 3),
+        "expected_margin": round(expected_final_diff, 1),
+    }
+
+
+def generic_spread_probability(sport: str, period: int, total_periods: int,
+                                current_diff: int, spread_line: float,
+                                clock_min: int = None) -> dict:
+    """
+    Dispatch to the right spread model based on sport.
+    """
+    if sport == "mlb":
+        return mlb_spread_probability(period, current_diff, spread_line)
+    elif sport in ("soccer", "world_cup", "epl"):
+        cm = clock_min if clock_min is not None else period * 45
+        return soccer_spread_probability(cm, current_diff, spread_line)
+    elif sport in ("nba", "wnba"):
+        mins = max(0, (total_periods - period) * 12)
+        return basketball_spread_probability(mins, current_diff, spread_line)
+    else:
+        # Generic fallback
+        periods_left = max(0, total_periods - period)
+        expected = current_diff
+        std = max(1.0, math.sqrt(max(0.5, periods_left)) * 2.0)
+        z = (expected - spread_line) / std if std > 0 else 0
+        cover = _normal_cdf(z)
+        return {"cover": round(cover, 3), "no_cover": round(1 - cover, 3),
+                "expected_margin": round(expected, 1)}
+
+
+def nfl_spread_probability(period: int, mins_remaining: float,
+                           current_diff: int, spread_line: float) -> dict:
+    """
+    Probability the leading NFL team wins by MORE than spread_line points.
+    """
+    total_game_mins = 60.0
+    mins_elapsed = max(1, (period - 1) * 15 + (15 - mins_remaining)) if period <= 4 \
+        else total_game_mins
+    mins_left = max(0, total_game_mins - mins_elapsed)
+
+    expected_final_diff = current_diff
+    # NFL margin std — scoring comes in chunks of 3 and 7
+    margin_std = max(3.0, math.sqrt(max(1, mins_left)) * 2.0)
+
+    if margin_std <= 0:
+        cover_prob = 1.0 if expected_final_diff > spread_line else 0.0
+    else:
+        z = (expected_final_diff - spread_line) / margin_std
+        cover_prob = _normal_cdf(z)
+
+    return {
+        "cover": round(cover_prob, 3),
+        "no_cover": round(1 - cover_prob, 3),
+        "expected_margin": round(expected_final_diff, 1),
+    }
+
+
+def nhl_spread_probability(period: int, mins_remaining: float,
+                           current_diff: int, spread_line: float = 1.5) -> dict:
+    """
+    Probability the leading NHL team wins by MORE than spread_line goals.
+    NHL spreads are usually 1.5 (the "puck line").
+    """
+    total_game_mins = 60.0
+    mins_elapsed = max(1, (period - 1) * 20 + (20 - mins_remaining)) if period <= 3 \
+        else total_game_mins
+    mins_left = max(0, total_game_mins - mins_elapsed)
+
+    expected_final_diff = current_diff
+    # NHL low-scoring — but empty-net goals late often pad leads
+    # A 2-goal lead late often becomes 3 via empty net
+    if current_diff >= 1 and mins_left <= 5:
+        expected_final_diff += 0.4  # empty net adjustment
+
+    margin_std = max(0.8, math.sqrt(max(0.3, mins_left * 0.09)))
+
+    if margin_std <= 0:
+        cover_prob = 1.0 if expected_final_diff > spread_line else 0.0
+    else:
+        z = (expected_final_diff - spread_line) / margin_std
+        cover_prob = _normal_cdf(z)
+
+    return {
+        "cover": round(cover_prob, 3),
+        "no_cover": round(1 - cover_prob, 3),
+        "expected_margin": round(expected_final_diff, 1),
+    }

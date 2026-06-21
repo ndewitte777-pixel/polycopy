@@ -138,8 +138,21 @@ def _soccer_rules(game: dict) -> list[dict]:
                 "team": None,
                 "confidence": min(78, 60 + int(total_goals * 5)),
                 "reason": f"{total_goals} goals in {elapsed:.0f}min ({goals_per_90:.1f}/90 pace) — OVER likely",
-                "preferred_line": 2.5,   # only match OVER 2.5, not 3.5+
+                "preferred_line": 2.5,
             })
+
+    # Rule: 2+ goal lead late → SPREAD (cover 1.5)
+    if abs(scores[0] - scores[1]) >= 2 and elapsed >= 70:
+        leader_idx = 0 if scores[0] > scores[1] else 1
+        signals.append({
+            "market_type": "SPREAD",
+            "bet_side": "HOME" if leader_idx == 0 else "AWAY",
+            "team": names[leader_idx],
+            "confidence": min(80, 62 + int(elapsed / 6)),
+            "reason": f"{names[leader_idx]} leads by {abs(scores[0]-scores[1])} "
+                      f"at {elapsed:.0f}min — likely covers spread",
+            "spread_line": 1.5,
+        })
 
     return signals
 
@@ -191,6 +204,19 @@ def _nba_rules(game: dict) -> list[dict]:
                 "reason": f"Scoring pace of {pace:.0f} pts/game suggests UNDER",
             })
 
+    # Rule: Large lead in 4th → SPREAD cover
+    if period >= 4 and score_diff >= 12 and clock <= 5:
+        leader_idx = 0 if scores[0] > scores[1] else 1
+        signals.append({
+            "market_type": "SPREAD",
+            "bet_side": "HOME" if leader_idx == 0 else "AWAY",
+            "team": names[leader_idx],
+            "confidence": min(82, 64 + score_diff),
+            "reason": f"{names[leader_idx]} up {score_diff} with {clock:.1f}min left "
+                      f"— likely covers spread",
+            "spread_line": 5.5,
+        })
+
     return signals
 
 
@@ -239,6 +265,19 @@ def _nfl_rules(game: dict) -> list[dict]:
                 "confidence": 66,
                 "reason": f"Scoring pace of {pace:.0f} pts/game suggests UNDER",
             })
+
+    # Rule: Two-score lead late → SPREAD cover
+    if period >= 4 and score_diff >= 11 and clock <= 6:
+        leader_idx = 0 if scores[0] > scores[1] else 1
+        signals.append({
+            "market_type": "SPREAD",
+            "bet_side": "HOME" if leader_idx == 0 else "AWAY",
+            "team": names[leader_idx],
+            "confidence": min(82, 66 + int(score_diff / 3)),
+            "reason": f"{names[leader_idx]} up {score_diff} with {clock:.1f}min "
+                      f"— likely covers spread",
+            "spread_line": 6.5,
+        })
 
     return signals
 
@@ -291,6 +330,20 @@ def _mlb_rules(game: dict) -> list[dict]:
             "preferred_line": 7.5,
         })
 
+    # Rule: Big late lead → SPREAD (likely to cover a small margin)
+    # Only when lead is large enough to safely cover 1.5 runs late
+    if period >= 8 and score_diff >= 3:
+        leader_idx = 0 if scores[0] > scores[1] else 1
+        signals.append({
+            "market_type": "SPREAD",
+            "bet_side": "HOME" if leader_idx == 0 else "AWAY",
+            "team": names[leader_idx],
+            "confidence": min(80, 60 + score_diff * 4),
+            "reason": f"{names[leader_idx]} leads by {score_diff} in inning {period} "
+                      f"— likely to cover spread",
+            "spread_line": 1.5,
+        })
+
     return signals
 
 
@@ -318,6 +371,20 @@ def _nhl_rules(game: dict) -> list[dict]:
             "confidence": min(88, 68 + int(elapsed / 5)),
             "reason": f"{names[leader_idx]} leads {scores[leader_idx]}-{scores[1-leader_idx]} "
                       f"with {remaining:.0f}min left",
+        })
+
+    # Rule: 2+ goal lead in 3rd period → SPREAD (puck line 1.5)
+    # Empty-net goals often pad the lead late, making the cover likely
+    if score_diff >= 2 and period >= 3:
+        leader_idx = 0 if scores[0] > scores[1] else 1
+        signals.append({
+            "market_type": "SPREAD",
+            "bet_side": "HOME" if leader_idx == 0 else "AWAY",
+            "team": names[leader_idx],
+            "confidence": min(80, 64 + int(elapsed / 6)),
+            "reason": f"{names[leader_idx]} leads by {score_diff} in P{period} "
+                      f"— empty-net often pads lead, covers 1.5",
+            "spread_line": 1.5,
         })
 
     return signals
@@ -807,13 +874,14 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
 
         # Define which Kalshi series are relevant per sport
         SPORT_SERIES = {
-            # NO SPREAD MARKETS — rule trader only knows score diff, not final margin
-            "mlb": ["KXMLBGAME", "KXMLBTOTAL"],
-            "nba": ["KXWNBAGAME", "KXWNBATOTAL"],
-            "nfl": ["KXNFLGAME"],
-            "nhl": ["KXNHLGAME"],
-            "soccer": ["KXWCGAME", "KXWCTOTAL", "KXWCBTTS", "KXWCGOAL"],
-            "world_cup": ["KXWCGAME", "KXWCTOTAL", "KXWCBTTS", "KXWCGOAL"],
+            "mlb": ["KXMLBGAME", "KXMLBTOTAL", "KXMLBSPREAD",
+                    "KXMLBHIT", "KXMLBHR", "KXMLBKS", "KXMLBHRR", "KXMLBTB", "KXMLBRFI"],
+            "nba": ["KXWNBAGAME", "KXWNBATOTAL", "KXWNBASPREAD", "KXWNBAPTS",
+                    "KXNBAGAME", "KXNBATOTAL", "KXNBASPREAD", "KXNBAPTS"],
+            "nfl": ["KXNFLGAME", "KXNFLTOTAL", "KXNFLSPREAD"],
+            "nhl": ["KXNHLGAME", "KXNHLTOTAL", "KXNHLSPREAD"],
+            "soccer": ["KXWCGAME", "KXWCTOTAL", "KXWCSPREAD", "KXWCBTTS", "KXWCGOAL"],
+            "world_cup": ["KXWCGAME", "KXWCTOTAL", "KXWCSPREAD", "KXWCBTTS", "KXWCGOAL"],
             # Tennis — match winner markets
             "tennis_atp": ["KXATPMATCH"],
             "tennis_wta": ["KXWTAMATCH"],
@@ -939,13 +1007,13 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
         if not ticker:
             continue
 
-        # Hard block — never bet spreads, player props, or exotic markets
-        # Rule trader only knows if a team is winning, not by how many runs
-        blocked_series = ["SPREAD", "HIT", "HR", "KS", "HRR", "TB", "RFI",
-                          "GOAL", "PTS", "3BALL", "BIRDIE", "EAGLE"]
-        if any(b in ticker.upper() for b in blocked_series):
-            log.debug("Rule trader: blocking %s (spread/prop market)", ticker[:40])
-            continue
+        # Identify market category for context (spread/prop need extra scrutiny)
+        ticker_upper = ticker.upper()
+        is_spread = "SPREAD" in ticker_upper
+        is_prop = any(p in ticker_upper for p in
+                      ["HIT", "HR", "KS", "HRR", "TB", "RFI", "PTS",
+                       "GOAL", "3BALL", "BIRDIE", "EAGLE"])
+        market_category = "SPREAD" if is_spread else ("PROP" if is_prop else "STANDARD")
 
         # Skip if we already have an open position on this ticker
         if ticker in state.get("open_lots", {}):
@@ -1016,12 +1084,14 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
         elif _prelim_side == "no" and real_yes > 0.01:
             market_price = 1 - real_yes
         try:
+            spread_line_val = best.get("spread_line", 1.5)
             eval_result = sm.evaluate_signal(
                 game=game,
                 market_price=market_price,
                 signal_type=market_type,
                 signal_side=bet_side,
                 session=requests.Session(),
+                spread_line=spread_line_val,
             )
             true_prob = eval_result.get("true_prob", 0.5)
             ev_data = eval_result.get("ev", {})
@@ -1134,6 +1204,7 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
                     stats_reasoning=stats_reason or "no statistical model",
                     rule_reason=reason,
                     planned_size=size_usdc,
+                    market_category=market_category,
                 )
                 if decision.get("decision") == "SKIP":
                     log.info(
