@@ -26,6 +26,8 @@ SPORT_ENDPOINTS = {
     "ufc": f"{ESPN_BASE}/mma/ufc/scoreboard",
     "mlb": f"{ESPN_BASE}/baseball/mlb/scoreboard",
     "nhl": f"{ESPN_BASE}/hockey/nhl/scoreboard",
+    "tennis_atp": f"{ESPN_BASE}/tennis/atp/scoreboard",
+    "tennis_wta": f"{ESPN_BASE}/tennis/wta/scoreboard",
 }
 
 PGA_LEADERBOARD_URL = f"{ESPN_BASE}/golf/pga/leaderboard"
@@ -193,7 +195,8 @@ def parse_espn_event(event: dict, sport: str) -> dict | None:
 def fetch_all_live_games(session: requests.Session = None) -> list:
     """Fetch live games across all supported sports including PGA."""
     all_games = []
-    sports = ["world_cup", "soccer", "nba", "nfl", "mlb", "nhl"]
+    sports = ["world_cup", "soccer", "nba", "nfl", "mlb", "nhl",
+              "ufc", "tennis_atp", "tennis_wta"]
     for sport in sports:
         games = fetch_live_games(sport, session)
         live = [g for g in games if g.get("is_live")]
@@ -240,17 +243,21 @@ def match_game_to_market(game: dict, market_question: str,
     }
 
     # Extract team code suffix from Kalshi ticker
-    # e.g. KXMLBTOTAL-26JUN192140LAAATH-19 → seg[1]="26JUN192140LAAATH" → LAAATH
-    # e.g. KXWCGAME-26JUN18CZERSA → seg[1]="26JUN18CZERSA" → CZERSA
-    # Note: last segment may be line number (-19, -9 etc) so use index 1 not -1
     ticker_team_part = ""
+    ticker_date_str = ""
     if ticker_upper:
         parts = ticker_upper.split("-")
-        # Second segment contains date+teams (e.g. "26JUN192140LAAATH")
         seg = parts[1] if len(parts) >= 2 else parts[0]
         team_match = _re.search(r"([A-Z]{3,})$", seg)
         if team_match:
             ticker_team_part = team_match.group(1)
+        # Extract date: 26JUN21 from e.g. "26JUN211605LAAATH"
+        date_match = _re.match(r"(\d{2}[A-Z]{3}\d{2})", seg)
+        if date_match:
+            ticker_date_str = date_match.group(1)
+
+    # Game date from ESPN
+    game_date = game.get("game_date", "")  # "2026-06-20"
 
     # Score: how many teams match the ticker
     if ticker_team_part:
@@ -267,15 +274,49 @@ def match_game_to_market(game: dict, market_question: str,
         elif matched == 1:
             score += 0.4
 
-    # Secondary: question text matching
+    # Date check — penalize heavily if ticker date doesn't match game date
+    # This prevents using tonight's score to bet on tomorrow's game
+    if score > 0 and ticker_date_str and game_date:
+        month_map = {"JAN":"01","FEB":"02","MAR":"03","APR":"04","MAY":"05",
+                     "JUN":"06","JUL":"07","AUG":"08","SEP":"09",
+                     "OCT":"10","NOV":"11","DEC":"12"}
+        dm = _re.match(r"(\d{2})([A-Z]{3})(\d{2})", ticker_date_str)
+        if dm:
+            ticker_date = (f"20{dm.group(1)}-"
+                          f"{month_map.get(dm.group(2), '00')}-"
+                          f"{dm.group(3)}")
+            if ticker_date != game_date:
+                # Wrong date — don't match this market at all
+                score = 0.0
+
+    # Secondary: question text matching (critical for tennis/UFC player names)
     q_lower = market_question.lower() if market_question else ""
-    if q_lower and score < 0.5:
+    sport = game.get("sport", "")
+    is_individual = sport in ("tennis", "tennis_atp", "tennis_wta", "ufc", "mma")
+
+    if q_lower:
+        matched_names = 0
         for team in teams:
             name = (team.get("name") or team.get("displayName") or "").lower()
-            words = [w for w in name.split() if len(w) > 3]
-            if any(w in q_lower for w in words):
+            # Match on surname (last word) — most reliable for athletes
+            words = [w for w in name.split() if len(w) > 2]
+            # For individuals, the last name is the key identifier
+            surname = words[-1] if words else ""
+            if surname and surname in q_lower:
+                matched_names += 1
+            elif any(w in q_lower for w in words if len(w) > 3):
+                matched_names += 0.5
+
+        if is_individual:
+            # Tennis/UFC — player name match is the primary signal
+            if matched_names >= 2:
+                score = max(score, 0.8)  # both players named
+            elif matched_names >= 1:
+                score = max(score, 0.5)  # one player named
+        else:
+            # Team sports — name match is secondary boost
+            if matched_names >= 1 and score < 0.5:
                 score += 0.2
-                break
 
     return min(score, 1.0)
 

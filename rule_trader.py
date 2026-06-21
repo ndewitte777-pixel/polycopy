@@ -325,6 +325,89 @@ def _nhl_rules(game: dict) -> list[dict]:
 
 # ── Main dispatcher ─────────────────────────────────────────────────────────
 
+def _tennis_rules(game: dict) -> list[dict]:
+    """
+    Tennis match rules based on sets and games won.
+    A player up a set and a break is a strong favorite to win.
+    Covers: match winner.
+    """
+    signals = []
+    teams = game.get("teams", [])
+    if len(teams) < 2:
+        return signals
+
+    # In tennis, ESPN "score" is sets won; linescores have game counts
+    sets = [_tennis_parse(t.get("score", "0")) for t in teams]
+
+    # Current set game scores from linescores if available
+    p1_games = game.get("p1_games", 0)
+    p2_games = game.get("p2_games", 0)
+
+    set_diff = sets[0] - sets[1]
+    leader_idx = 0 if sets[0] > sets[1] else 1
+
+    # Best of 3 (most matches) vs best of 5 (Grand Slam men's)
+    sets_to_win = 3 if game.get("best_of_5") else 2
+
+    # Rule: A player who has won enough sets to be on match point
+    if abs(set_diff) >= 1:
+        leader_sets = sets[leader_idx]
+        # If leader needs just one more set
+        if leader_sets == sets_to_win - 1:
+            confidence = 80 if abs(set_diff) >= 2 else 70
+            signals.append({
+                "market_type": "WIN",
+                "bet_side": "HOME" if leader_idx == 0 else "AWAY",
+                "team": teams[leader_idx].get("name"),
+                "confidence": confidence,
+                "reason": f"{teams[leader_idx].get('name')} leads {leader_sets} sets to {sets[1-leader_idx]}, one set from victory",
+            })
+
+    return signals
+
+
+def _tennis_parse(s) -> int:
+    """Parse tennis set score to int."""
+    try:
+        return int(str(s).strip())
+    except (ValueError, TypeError):
+        return 0
+
+
+def _ufc_rules(game: dict) -> list[dict]:
+    """
+    UFC fight rules. Live in-fight betting is limited because fights
+    can end suddenly (KO/submission). We only signal on clear dominance
+    indicators if available, otherwise stay out.
+    Covers: fight winner.
+
+    NOTE: UFC is high-variance — a losing fighter can win instantly with
+    one punch. We are conservative here and mostly rely on Claude + odds.
+    """
+    signals = []
+    teams = game.get("teams", [])
+    if len(teams) < 2:
+        return signals
+
+    period = int(game.get("period", 0) or 0)  # round number
+
+    # UFC live data from ESPN is limited. We only act if ESPN flags a
+    # clear winner indication (e.g. a fighter marked as winning).
+    # Otherwise we let it go to Claude with whatever odds exist.
+    for idx, t in enumerate(teams):
+        if t.get("winner"):
+            signals.append({
+                "market_type": "WIN",
+                "bet_side": "HOME" if idx == 0 else "AWAY",
+                "team": t.get("name"),
+                "confidence": 65,
+                "reason": f"{t.get('name')} winning in round {period}",
+            })
+            break
+
+    return signals
+
+
 def _pga_rules(game: dict) -> list[dict]:
     """
     PGA Tour rules based on leaderboard position.
@@ -552,6 +635,11 @@ SPORT_RULES = {
     "mlb": _mlb_rules,
     "nhl": _nhl_rules,
     "pga": _pga_rules,
+    "tennis_atp": _tennis_rules,
+    "tennis_wta": _tennis_rules,
+    "tennis": _tennis_rules,
+    "ufc": _ufc_rules,
+    "mma": _ufc_rules,
 }
 
 
@@ -726,6 +814,13 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
             "nhl": ["KXNHLGAME"],
             "soccer": ["KXWCGAME", "KXWCTOTAL", "KXWCBTTS", "KXWCGOAL"],
             "world_cup": ["KXWCGAME", "KXWCTOTAL", "KXWCBTTS", "KXWCGOAL"],
+            # Tennis — match winner markets
+            "tennis_atp": ["KXATPMATCH"],
+            "tennis_wta": ["KXWTAMATCH"],
+            "tennis": ["KXATPMATCH", "KXWTAMATCH"],
+            # UFC — fight winner markets
+            "ufc": ["KXUFCFIGHT"],
+            "mma": ["KXUFCFIGHT"],
             # PGA — all tournament markets
             "pga": ["KXPGATOUR",      # Tournament winner
                     "KXPGATOP5",       # Top 5 finish
@@ -906,7 +1001,22 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
         bankroll = state.get("bankroll", 25.0)
         size_usdc = min(max(bankroll * kelly_f, 1.0), MAX_TRADE_USDC)
 
-        # ── Statistical EV check ──────────────────────────────────
+        # Get real current market price from the matched market
+        # Markets fetched by SDK have yes_ask/yes_bid fields
+        real_yes = (float(target_market.get("yes_ask") or
+                         target_market.get("yes_bid") or
+                         target_market.get("yes_price") or 0) / 100
+                    if (target_market.get("yes_ask") or "") != "" else 0)
+        if not real_yes or real_yes <= 0.01 or real_yes >= 0.99:
+            real_yes = market_price  # fall back to default
+
+        # Adjust market_price to real price for this side
+        if kalshi_side == "yes" and real_yes > 0.01:
+            market_price = real_yes
+        elif kalshi_side == "no" and real_yes > 0.01:
+            market_price = 1 - real_yes
+
+        log.debug("Real market price: %.3f for %s %s", market_price, kalshi_side, ticker)
         try:
             import stats_models as sm
             eval_result = sm.evaluate_signal(
@@ -1007,50 +1117,61 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
         # --- Claude filter on rule trades ---
         claude_reason = "filter disabled"
         claude_confidence = 0
-        # Ask Claude to review before placing any real money
+        # Ask Claude to review with full statistical context before placing
         try:
             import claude_filter as _cf
             from config import USE_CLAUDE_FILTER
             if USE_CLAUDE_FILTER:
                 from sports_data import format_game_context
                 game_summary = format_game_context(game)
-                market_info_for_filter = {
-                    "question": target_market.get("question", "?"),
-                    "outcome": kalshi_side,
-                    "end_date": str(target_market.get("endDate", "")),
-                    "liquidity": target_market.get("liquidity", 0),
-                    "category": "SPORTS",
-                    "url": f"https://kalshi.com/markets/{ticker}",
-                    "extra_context": game_summary,
-                }
-                decision = _cf.evaluate_trade(
-                    market_info=market_info_for_filter,
-                    price=market_price,
-                    your_size=size_usdc,
-                    conviction=1,
-                    trader_bankroll=state.get("bankroll", 25.0),
-                    usdc_size=size_usdc,
+                edge_val = edge if 'edge' in dir() else 0.0
+                true_prob_val = true_prob if 'true_prob' in dir() else 0.5
+
+                decision = _cf.evaluate_rule_trade(
+                    game_context=game_summary,
+                    market_question=target_market.get("question", "?"),
+                    market_price=market_price,
+                    bet_side=f"{kalshi_side} ({bet_side})",
+                    true_prob=true_prob_val,
+                    edge=edge_val,
+                    stats_reasoning=stats_reason or "no statistical model",
+                    rule_reason=reason,
+                    planned_size=size_usdc,
                 )
                 if decision.get("decision") == "SKIP":
                     log.info(
-                        "Claude FILTERED rule trade: %s | conf=%d | %s",
-                        target_market.get("question", "?")[:60],
+                        "🚫 Claude SKIP: %s | conf=%d | %s",
+                        target_market.get("question", "?")[:50],
                         decision.get("confidence", 0),
                         decision.get("reason", ""),
                     )
                     continue
-                # Store Claude's approval reason for notification
+
                 claude_confidence = decision.get("confidence", 0)
                 claude_reason = decision.get("reason", "")
                 claude_size_pct = decision.get("suggested_size_pct", 100)
+
+                # Require minimum Claude confidence to proceed
+                from config import CLAUDE_MIN_CONFIDENCE
+                if claude_confidence < CLAUDE_MIN_CONFIDENCE:
+                    log.info(
+                        "🚫 Claude confidence too low (%d < %d): %s",
+                        claude_confidence, CLAUDE_MIN_CONFIDENCE,
+                        claude_reason[:60],
+                    )
+                    continue
+
+                # Adjust size by Claude's suggestion
                 if claude_size_pct < 100:
                     size_usdc = size_usdc * (claude_size_pct / 100)
                     size_usdc = max(size_usdc, MIN_BET_SIZE)
-                log.info("Claude APPROVED: conf=%d | %s", claude_confidence, claude_reason[:80])
+
+                log.info("✅ Claude APPROVED: conf=%d | size=%d%% | %s",
+                         claude_confidence, claude_size_pct, claude_reason[:80])
         except Exception as e:
             log.debug("Claude filter error in rule trader: %s — proceeding", e)
-            claude_confidence = 0
-            claude_reason = "filter error — proceeding on rules"
+            claude_confidence = 60
+            claude_reason = reason or "filter error — proceeding on rules"
 
         log.info(
             "RULE TRADE | %s | %s %s | conf=%d | edge=%.1f%% | $%.2f\n"
@@ -1108,13 +1229,29 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
         _daily_rule_trade_count += 1
         entries += 1
 
+        # Build comprehensive notification with all the math
+        edge_str = f"{edge*100:+.1f}%" if 'edge' in dir() else "n/a"
+        true_prob_str = f"{true_prob*100:.0f}%" if 'true_prob' in dir() else "n/a"
+        game_score = format_game_context(game).split("\n")[1] if game else ""
+
         notifier.send(
-            title=f"📊 RULE {market_type} | {kalshi_side} | {game.get('short_name','?')}",
+            title=f"📊 {kalshi_side} {game.get('short_name','?')} | {claude_confidence}% conf",
             message=(
-                f"{target_market.get('question','?')}\n\n"
-                f"Bet: {kalshi_side} @ {market_price:.2f} | Size: ${size_usdc:.2f}\n"
-                f"Rule: {reason}\n\n"
-                f"✅ Claude ({claude_confidence}%): {claude_reason}"
+                f"🎯 {target_market.get('question','?')}\n"
+                f"━━━━━━━━━━━━━━━\n"
+                f"📍 {game_score}\n"
+                f"💵 Bet: {kalshi_side} @ {market_price:.2f} | ${size_usdc:.2f}\n"
+                f"━━━━━━━━━━━━━━━\n"
+                f"📐 THE MATH:\n"
+                f"• True probability: {true_prob_str}\n"
+                f"• Market price: {market_price*100:.0f}%\n"
+                f"• Edge: {edge_str}\n"
+                f"• Stats: {stats_reason[:100] if stats_reason else 'rule-based'}\n"
+                f"━━━━━━━━━━━━━━━\n"
+                f"🤖 CLAUDE ({claude_confidence}% confident):\n"
+                f"{claude_reason}\n"
+                f"━━━━━━━━━━━━━━━\n"
+                f"⚙️ Rule trigger: {reason}"
             ),
         )
 

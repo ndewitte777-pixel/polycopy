@@ -680,6 +680,13 @@ def evaluate_signal(game: dict, market_price: float,
                 f"NFL win prob: {true_prob:.1%} "
                 f"(+{score_diff} in Q{period})"
             )
+        elif signal_type == "TOTAL":
+            total = nfl_total_probability(s1 + s2, period, mins_rem, 44.5)
+            true_prob = total["over"] if signal_side == "OVER" else total["under"]
+            reason_parts.append(
+                f"NFL total: {true_prob:.1%} {signal_side} "
+                f"(projected {total['projected_total']})"
+            )
 
     elif sport == "nhl":
         mins_rem = _parse_clock(clock)
@@ -689,6 +696,51 @@ def evaluate_signal(game: dict, market_price: float,
                 f"NHL win prob: {true_prob:.1%} "
                 f"(+{score_diff} in P{period})"
             )
+        elif signal_type == "TOTAL":
+            total = nhl_total_probability(s1 + s2, period, mins_rem, 5.5)
+            true_prob = total["over"] if signal_side == "OVER" else total["under"]
+            reason_parts.append(
+                f"NHL total: {true_prob:.1%} {signal_side} "
+                f"(projected {total['projected_total']})"
+            )
+
+    elif sport in ("tennis", "tennis_atp", "tennis_wta"):
+        if signal_type == "WIN" and score_diff != 0:
+            leader_sets = int(max(s1, s2))
+            trailer_sets = int(min(s1, s2))
+            best_of_5 = game.get("best_of_5", False)
+            true_prob = tennis_win_probability(
+                leader_sets, trailer_sets, best_of_5=best_of_5
+            )
+            # If betting on the trailer, invert
+            leader_is_home = s1 > s2
+            betting_home = signal_side in ("HOME", "YES")
+            if betting_home != leader_is_home:
+                true_prob = 1 - true_prob
+            reason_parts.append(
+                f"Tennis win prob: {true_prob:.1%} "
+                f"(sets {leader_sets}-{trailer_sets})"
+            )
+
+    elif sport in ("ufc", "mma"):
+        if signal_type == "WIN":
+            # UFC: only confident if there's a clear winner indication
+            is_winning = score_diff > 0 or signal_side in ("HOME", "YES")
+            true_prob = ufc_win_probability(period, is_winning=is_winning)
+            reason_parts.append(
+                f"UFC win prob: {true_prob:.1%} (round {period}) "
+                f"— high variance, conservative estimate"
+            )
+
+    # Generic fallback for any sport/signal combo not covered above
+    if not reason_parts and signal_type == "WIN" and score_diff > 0:
+        total_periods = {"mlb": 9, "nba": 4, "nfl": 4, "nhl": 3,
+                         "soccer": 2, "world_cup": 2}.get(sport, 4)
+        true_prob = generic_win_probability(score_diff, period, total_periods)
+        reason_parts.append(
+            f"Generic win model: {true_prob:.1%} "
+            f"(+{score_diff} lead, period {period}/{total_periods})"
+        )
 
     # ── Recent form adjustment ────────────────────────────────────
     form_adj = 0.0
@@ -813,3 +865,608 @@ def _parse_clock(clock: str) -> float:
         return float(clock)
     except (ValueError, IndexError):
         return 12.0
+
+
+# ─────────────────────────────────────────────
+#  ADVANCED EDGE DETECTION
+# ─────────────────────────────────────────────
+
+"""
+Advanced Edge Detection Layers
+================================
+These layers identify when Kalshi's market price is WRONG relative to
+what the math says. The bigger the gap, the bigger the edge.
+
+Layer 1: Momentum Model
+  Tracks whether scoring rate is accelerating or decelerating.
+  A team scoring 3 runs in the last inning has MORE edge than
+  a team that scored their 3 runs in inning 1.
+
+Layer 2: Pitcher/Fatigue Model (MLB)
+  Late game = bullpen time = higher variance
+  Starters through 7 innings are MORE reliable than bullpen
+
+Layer 3: Market Lag Detection
+  Kalshi prices update slower than reality.
+  When a game changes dramatically (big inning, red card, injury)
+  the market takes 30-90 seconds to adjust.
+  We can detect this by comparing true_prob to market_price.
+
+Layer 4: Outs-Adjusted MLB Model
+  Accounts for outs remaining in inning, not just inning number.
+  Bottom of 9th with 2 outs is very different from top of 9th.
+
+Layer 5: Soccer Red Card Model
+  A red card is worth ~0.3 goals and changes win probability significantly.
+  Kalshi is slow to reflect this.
+
+Layer 6: Score Pace Volatility
+  High-scoring games have higher variance — OVER is better value.
+  Low-scoring pitcher's duels have lower variance — UNDER is better value.
+"""
+
+import statistics as _stats
+
+
+# ── Layer 1: Momentum Model ──────────────────
+
+def calculate_momentum(game: dict) -> dict:
+    """
+    Analyze scoring momentum — is the leading team accelerating?
+    Returns momentum score (-1 to +1) for the leading team.
+
+    Positive = leading team is on a hot streak
+    Negative = trailing team has momentum
+    """
+    teams = game.get("teams", [])
+    if len(teams) < 2:
+        return {"momentum": 0, "hot_team": None, "reason": "insufficient data"}
+
+    # Get play-by-play scoring history if available
+    plays = game.get("recent_plays", [])
+    period = int(game.get("period", 0) or 0)
+    sport = game.get("sport", "")
+
+    scores = [float(t.get("score", 0) or 0) for t in teams]
+    if not scores:
+        return {"momentum": 0, "hot_team": None, "reason": "no scores"}
+
+    leader_idx = 0 if scores[0] >= scores[1] else 1
+    trailer_idx = 1 - leader_idx
+    score_diff = abs(scores[0] - scores[1])
+
+    # Without play-by-play, estimate momentum from scoring pace
+    # In late innings, if leader has been scoring recently, momentum is positive
+    momentum = 0.0
+    reason = "base momentum"
+
+    if sport == "mlb":
+        # Late-inning large leads have strong positive momentum
+        if period >= 7 and score_diff >= 3:
+            momentum = 0.6
+            reason = f"Large lead ({score_diff} runs) in inning {period}"
+        elif period >= 8 and score_diff >= 2:
+            momentum = 0.7
+            reason = f"Late lead ({score_diff} runs) in inning {period}"
+        elif period >= 9 and score_diff >= 1:
+            momentum = 0.8
+            reason = f"Final inning lead"
+
+    elif sport in ("soccer", "world_cup"):
+        try:
+            clock_min = int(str(game.get("clock", "0")).split(":")[0])
+        except (ValueError, IndexError):
+            clock_min = period * 45
+
+        if score_diff >= 2 and clock_min >= 70:
+            momentum = 0.7
+            reason = f"2+ goal lead at {clock_min}'"
+        elif score_diff == 1 and clock_min >= 80:
+            momentum = 0.4
+            reason = f"1 goal lead at {clock_min}'"
+
+    elif sport == "nba":
+        # Minutes remaining approximation
+        mins_per_q = 12
+        mins_remaining = max(0, (4 - period) * mins_per_q)
+        if score_diff >= 15 and mins_remaining <= 6:
+            momentum = 0.8
+            reason = f"+{score_diff} with {mins_remaining:.0f}min left"
+        elif score_diff >= 10 and mins_remaining <= 4:
+            momentum = 0.75
+            reason = f"+{score_diff} with {mins_remaining:.0f}min left"
+
+    elif sport == "nfl":
+        mins_remaining = max(0, (4 - period) * 15)
+        if score_diff >= 14 and mins_remaining <= 8:
+            momentum = 0.75
+            reason = f"+{score_diff} with {mins_remaining:.0f}min left"
+        elif score_diff >= 21:
+            momentum = 0.8
+            reason = f"Three-score lead ({score_diff})"
+
+    elif sport == "nhl":
+        if score_diff >= 3 and period >= 3:
+            momentum = 0.7
+            reason = f"+{score_diff} goals in 3rd period"
+        elif score_diff >= 2 and period >= 3:
+            momentum = 0.5
+            reason = f"+{score_diff} goals late"
+
+    elif sport == "pga":
+        # For golf, "score" is strokes — lower is better, momentum based on lead
+        if score_diff >= 4:
+            momentum = 0.6
+            reason = f"{score_diff}-stroke lead"
+        elif score_diff >= 2:
+            momentum = 0.4
+            reason = f"{score_diff}-stroke lead"
+
+    elif sport in ("tennis", "tennis_atp", "tennis_wta"):
+        # Sets lead is strong momentum in tennis
+        if score_diff >= 2:
+            momentum = 0.7
+            reason = f"Up {score_diff} sets"
+        elif score_diff == 1:
+            momentum = 0.5
+            reason = "Up 1 set"
+
+    elif sport in ("ufc", "mma"):
+        # UFC momentum is unreliable — keep it low
+        momentum = 0.2 if score_diff > 0 else 0.0
+        reason = "UFC — momentum unreliable, high KO variance"
+
+    return {
+        "momentum": momentum,
+        "hot_team_idx": leader_idx,
+        "hot_team": teams[leader_idx].get("name", "?") if teams else None,
+        "reason": reason,
+    }
+
+
+# ── Layer 2: Market Lag Detection ────────────
+
+def detect_market_lag(true_prob: float, market_price: float,
+                       game: dict) -> dict:
+    """
+    Detect if Kalshi's market price hasn't caught up to reality.
+
+    Returns lag score 0-1 and whether we should bet.
+    High lag = market is stale = strong buy signal.
+    """
+    if true_prob <= 0 or market_price <= 0:
+        return {"lag": 0, "edge": 0, "bet_now": False}
+
+    raw_edge = true_prob - market_price
+    lag_score = abs(raw_edge)
+
+    # Classify the edge
+    if lag_score >= 0.15:
+        strength = "STRONG"
+        bet_now = True
+    elif lag_score >= 0.10:
+        strength = "MODERATE"
+        bet_now = True
+    elif lag_score >= 0.05:
+        strength = "WEAK"
+        bet_now = raw_edge > 0  # only bet if in our favor
+    else:
+        strength = "NONE"
+        bet_now = False
+
+    # Directional — only signal if edge is in our favor
+    in_our_favor = raw_edge > 0
+
+    return {
+        "lag": lag_score,
+        "edge": raw_edge,
+        "strength": strength,
+        "bet_now": bet_now and in_our_favor,
+        "reason": f"True prob {true_prob:.1%} vs market {market_price:.1%} = {raw_edge:+.1%} edge ({strength})"
+    }
+
+
+# ── Layer 3: Outs-Adjusted MLB Model ─────────
+
+# MLB win probability accounting for outs in inning
+# (inning, half, outs, run_diff) → win_prob
+# half: 0=top (visitor batting), 1=bottom (home batting)
+MLB_WIN_PROB_OUTS = {
+    # Top of 9th (away team batting, home team leads by X)
+    # Home team wants to preserve lead — higher win prob in bottom half
+    (9, 0, 0, 1): 0.850, (9, 0, 0, 2): 0.945, (9, 0, 0, 3): 0.984,
+    (9, 0, 1, 1): 0.870, (9, 0, 1, 2): 0.955, (9, 0, 1, 3): 0.988,
+    (9, 0, 2, 1): 0.905, (9, 0, 2, 2): 0.970, (9, 0, 2, 3): 0.993,
+    # Bottom of 9th (home team batting, trailing)
+    (9, 1, 0, 1): 0.765, (9, 1, 0, 2): 0.892, (9, 1, 0, 3): 0.961,
+    (9, 1, 1, 1): 0.810, (9, 1, 1, 2): 0.918, (9, 1, 1, 3): 0.973,
+    (9, 1, 2, 1): 0.865, (9, 1, 2, 2): 0.948, (9, 1, 2, 3): 0.985,
+}
+
+
+def mlb_win_prob_outs(inning: int, half: int, outs: int,
+                       run_diff: int, home_team_leads: bool) -> float:
+    """
+    More precise MLB win probability using outs remaining.
+    half: 0=top, 1=bottom
+    outs: 0, 1, or 2
+    run_diff: positive integer (magnitude of lead)
+    """
+    diff_key = min(run_diff, 3)
+    key = (inning, half, outs, diff_key)
+
+    if key in MLB_WIN_PROB_OUTS:
+        prob = MLB_WIN_PROB_OUTS[key]
+        # Adjust if home/away is flipped relative to our key
+        if not home_team_leads and half == 1:
+            # Away team leads in bottom of inning — they're at bat
+            prob = 1 - prob
+        return prob
+
+    # Fall back to inning-only model
+    from stats_models import mlb_win_probability
+    return mlb_win_probability(inning, run_diff, home_team_leads)
+
+
+# ── Layer 4: Soccer Red Card Model ──────────
+
+def soccer_red_card_adjustment(home_players: int = 11,
+                                away_players: int = 11) -> dict:
+    """
+    Adjust win probabilities for red cards.
+    A red card reduces a team to 10 men and is worth approximately
+    +0.25 goal equivalent to the other team.
+    """
+    if home_players == away_players:
+        return {"home_adj": 0, "away_adj": 0, "note": "no red cards"}
+
+    home_advantage = home_players - away_players  # positive = home has more players
+
+    # Each player advantage is worth ~0.12-0.15 probability points
+    PLAYER_VALUE = 0.13
+
+    return {
+        "home_adj": home_advantage * PLAYER_VALUE,
+        "away_adj": -home_advantage * PLAYER_VALUE,
+        "note": f"Home {home_players} vs Away {away_players} players",
+    }
+
+
+# ── Layer 5: Score Pace Volatility ──────────
+
+def score_pace_volatility(sport: str, current_total: float,
+                           period: int, periods_remaining: float) -> dict:
+    """
+    Calculate expected variance in final score.
+    High variance = totals markets are more valuable.
+    Low variance = win markets are more valuable (leads are safer).
+
+    Returns:
+    - expected_final: predicted final score total
+    - std_dev: standard deviation of expected final
+    - over_value: which lines have good OVER value
+    - under_value: which lines have good UNDER value
+    """
+    if period <= 0 or periods_remaining < 0:
+        return {}
+
+    # Points per period averages
+    avg_per_period = {
+        "mlb": 1.0,     # ~9 runs per game / 9 innings
+        "nba": 24.0,    # ~200 points / ~8.3 quarters worth
+        "nfl": 6.5,     # ~45 points / 4 quarters + OT
+        "nhl": 0.65,    # ~5.5 goals / 9 periods
+        "soccer": 1.3,  # ~2.6 goals / 2 halves
+        "world_cup": 1.3,
+    }.get(sport, 1.0)
+
+    expected_additional = avg_per_period * periods_remaining
+    expected_final = current_total + expected_additional
+
+    # Variance scales with remaining periods
+    # Using Poisson approximation: variance ≈ expected value
+    variance = expected_additional * 1.1  # slight overdispersion
+    std_dev = math.sqrt(max(variance, 0.1))
+
+    # Which total lines are +EV?
+    # Lines within 1 std dev of expected are roughly 50/50
+    # Lines >1.5 std devs away have strong directional probability
+    over_edge_line = expected_final + 0.5 * std_dev  # OVER this = slight value
+    under_edge_line = expected_final - 0.5 * std_dev  # UNDER this = slight value
+
+    return {
+        "expected_final": round(expected_final, 1),
+        "std_dev": round(std_dev, 2),
+        "over_edge_line": round(over_edge_line, 1),
+        "under_edge_line": round(under_edge_line, 1),
+        "high_variance": std_dev > avg_per_period * 1.5,
+    }
+
+
+# ── Combined Advanced Evaluator ──────────────
+
+def advanced_evaluate(game: dict, market_price: float,
+                       signal_type: str, signal_side: str,
+                       base_true_prob: float) -> dict:
+    """
+    Run all advanced layers and combine into final recommendation.
+
+    Returns enhanced evaluation with:
+    - final_true_prob: probability after all adjustments
+    - total_edge: combined edge
+    - confidence_boost: how much to boost rule confidence
+    - bet_size_mult: Kelly-adjusted size multiplier
+    - reasoning: full explanation
+    """
+    sport = game.get("sport", "")
+    teams = game.get("teams", [])
+    period = int(game.get("period", 0) or 0)
+    scores = [float(t.get("score", 0) or 0) for t in teams]
+
+    reasoning = []
+    adjustments = []
+    true_prob = base_true_prob
+
+    # Layer 1: Momentum
+    momentum = calculate_momentum(game)
+    mom_score = momentum.get("momentum", 0)
+    if mom_score > 0.3:
+        adj = mom_score * 0.05  # up to +5% from momentum
+        adjustments.append(adj)
+        reasoning.append(f"Momentum: {momentum['reason']} (+{adj:.1%})")
+
+    # Layer 2: Market Lag
+    lag = detect_market_lag(true_prob, market_price, game)
+    if lag.get("bet_now") and lag["lag"] > 0.05:
+        reasoning.append(f"Market lag: {lag['reason']}")
+
+    # Layer 3: Outs-adjusted (MLB only)
+    if sport == "mlb" and period >= 7 and len(scores) >= 2:
+        score_diff = abs(scores[0] - scores[1])
+        home_leads = scores[1] > scores[0]  # scores[1] = home team
+        outs = int(game.get("outs", 0) or 0)
+        half = 0 if game.get("batting_team") == "away" else 1
+
+        if score_diff > 0:
+            outs_prob = mlb_win_prob_outs(
+                period, half, outs, int(score_diff), home_leads
+            )
+            if abs(outs_prob - true_prob) > 0.03:
+                adj = outs_prob - true_prob
+                adjustments.append(adj)
+                reasoning.append(
+                    f"Outs-adjusted prob: {outs_prob:.1%} "
+                    f"(outs={outs}, half={'bottom' if half else 'top'})"
+                )
+                true_prob = outs_prob
+
+    # Layer 4: Score pace volatility for total markets
+    if signal_type == "TOTAL":
+        current_total = sum(scores)
+        periods_per_game = {"mlb": 9, "nba": 4, "nfl": 4, "nhl": 3,
+                            "soccer": 2, "world_cup": 2}.get(sport, 9)
+        periods_remaining = max(0, periods_per_game - period)
+
+        vol = score_pace_volatility(sport, current_total, period, periods_remaining)
+        if vol:
+            expected = vol.get("expected_final", current_total)
+            reasoning.append(
+                f"Score pace: expected final {expected:.1f} "
+                f"(±{vol.get('std_dev', 0):.1f})"
+            )
+
+    # Apply adjustments
+    for adj in adjustments:
+        true_prob = max(0.01, min(0.99, true_prob + adj))
+
+    # Calculate final edge and recommendation
+    edge = true_prob - market_price
+    ev = calculate_ev(true_prob, market_price)
+
+    # Confidence boost based on number of confirming layers
+    confidence_boost = min(15, len(reasoning) * 4)
+
+    # Size multiplier — bet bigger when more layers confirm
+    if edge >= 0.15:
+        size_mult = 1.3
+    elif edge >= 0.10:
+        size_mult = 1.1
+    elif edge >= 0.05:
+        size_mult = 1.0
+    else:
+        size_mult = 0.8
+
+    # Final recommendation
+    should_bet = edge >= 0.05 and true_prob >= 0.55
+
+    return {
+        "true_prob": round(true_prob, 3),
+        "market_price": market_price,
+        "edge": round(edge, 3),
+        "ev": ev,
+        "should_bet": should_bet,
+        "confidence_boost": confidence_boost,
+        "size_mult": size_mult,
+        "reasoning": reasoning,
+        "reasoning_str": " | ".join(reasoning) if reasoning else "base model only",
+        "momentum": momentum,
+        "market_lag": lag,
+    }
+
+
+# ─────────────────────────────────────────────
+#  NFL / NHL TOTAL MODELS + GENERIC FALLBACK
+# ─────────────────────────────────────────────
+
+def nfl_total_probability(current_total: int, period: int,
+                           mins_remaining: float, line: float = 44.5) -> dict:
+    """NFL total points over/under probability."""
+    # NFL averages ~0.75 points per minute of game time
+    total_game_mins = 60.0
+    mins_elapsed = max(1, (period - 1) * 15 + (15 - mins_remaining)) if period <= 4 \
+        else total_game_mins
+    mins_left = max(0, total_game_mins - mins_elapsed)
+
+    # Project remaining scoring based on pace
+    if mins_elapsed > 0:
+        pace = current_total / mins_elapsed
+        projected_additional = pace * mins_left
+    else:
+        projected_additional = 0.75 * mins_left
+    projected_total = current_total + projected_additional
+
+    # Standard deviation grows with time remaining
+    std = max(3.0, math.sqrt(mins_left) * 2.2)
+    if std <= 0:
+        over_prob = 1.0 if projected_total > line else 0.0
+    else:
+        z = (projected_total - line) / std
+        over_prob = _normal_cdf(z)
+
+    return {
+        "over": round(over_prob, 3),
+        "under": round(1 - over_prob, 3),
+        "projected_total": round(projected_total, 1),
+    }
+
+
+def nhl_total_probability(current_total: int, period: int,
+                           mins_remaining: float, line: float = 5.5) -> dict:
+    """NHL total goals over/under probability."""
+    total_game_mins = 60.0
+    mins_elapsed = max(1, (period - 1) * 20 + (20 - mins_remaining)) if period <= 3 \
+        else total_game_mins
+    mins_left = max(0, total_game_mins - mins_elapsed)
+
+    # NHL averages ~0.09 goals per minute
+    expected_additional = 0.09 * mins_left
+    projected_total = current_total + expected_additional
+
+    # Poisson model for remaining goals
+    over_prob = _poisson_over(line - current_total, expected_additional)
+
+    return {
+        "over": round(over_prob, 3),
+        "under": round(1 - over_prob, 3),
+        "projected_total": round(projected_total, 1),
+    }
+
+
+def _normal_cdf(z: float) -> float:
+    """Standard normal CDF approximation."""
+    return 0.5 * (1 + math.erf(z / math.sqrt(2)))
+
+
+def _poisson_over(threshold: float, lam: float) -> float:
+    """P(Poisson(lam) > threshold) — probability of exceeding threshold goals."""
+    if lam <= 0:
+        return 0.0 if threshold >= 0 else 1.0
+    if threshold < 0:
+        return 1.0
+    # Sum P(X = k) for k from 0 to floor(threshold), subtract from 1
+    cumulative = 0.0
+    k_max = int(math.floor(threshold))
+    for k in range(0, k_max + 1):
+        cumulative += math.exp(-lam) * (lam ** k) / math.factorial(k)
+    return max(0.0, min(1.0, 1 - cumulative))
+
+
+def generic_win_probability(score_diff: int, period: int,
+                             total_periods: int) -> float:
+    """
+    Generic win probability for sports without a specific model.
+    Uses a logistic curve based on lead size and how late in the game it is.
+    """
+    if score_diff <= 0:
+        return 0.5
+
+    # How far through the game (0 to 1)
+    progress = min(1.0, period / max(total_periods, 1))
+
+    # Larger leads and later game = higher win probability
+    # Logistic function: bigger lead + later = more certain
+    base = 1 / (1 + math.exp(-0.4 * score_diff))  # lead component
+    time_factor = 0.5 + 0.5 * progress  # late game amplifies
+
+    win_prob = 0.5 + (base - 0.5) * (1 + time_factor)
+    return max(0.5, min(0.99, win_prob))
+
+
+# ─────────────────────────────────────────────
+#  TENNIS & UFC MODELS
+# ─────────────────────────────────────────────
+
+def tennis_win_probability(sets_won_leader: int, sets_won_trailer: int,
+                            games_lead_current_set: int = 0,
+                            best_of_5: bool = False) -> float:
+    """
+    Tennis match win probability based on sets won.
+    A player leading in sets has a strong advantage.
+
+    Historical conversion rates:
+    - Up 1 set in best-of-3: ~78% win
+    - Up 2 sets in best-of-5: ~90% win
+    - One set from winning: ~85-95%
+    """
+    sets_to_win = 3 if best_of_5 else 2
+    set_diff = sets_won_leader - sets_won_trailer
+
+    # Leader needs (sets_to_win - sets_won_leader) more sets
+    sets_needed = sets_to_win - sets_won_leader
+
+    if sets_needed <= 0:
+        return 0.99  # already won
+
+    if best_of_5:
+        # Best of 5 conversion rates
+        prob_table = {
+            (1, 0): 0.70, (2, 0): 0.90, (2, 1): 0.78,
+            (1, 1): 0.50, (0, 0): 0.50,
+        }
+    else:
+        # Best of 3 conversion rates
+        prob_table = {
+            (1, 0): 0.78, (0, 0): 0.50, (1, 1): 0.50,
+        }
+
+    base = prob_table.get((sets_won_leader, sets_won_trailer), None)
+    if base is None:
+        # Fallback: each set lead worth ~25%
+        base = min(0.95, 0.5 + set_diff * 0.25)
+
+    # Adjust for games lead in current set
+    if games_lead_current_set >= 2:
+        base = min(0.97, base + 0.05)
+
+    return max(0.5, min(0.97, base))
+
+
+def ufc_win_probability(round_num: int, is_winning: bool = False,
+                         finish_threat: bool = False) -> float:
+    """
+    UFC fight win probability — intentionally conservative.
+
+    UFC is the highest-variance sport: a losing fighter can win
+    instantly with one strike or submission at any moment.
+
+    We never assign high confidence to live UFC bets unless there's
+    a clear finish threat. Most of the decision is deferred to Claude
+    and the actual market odds.
+    """
+    if not is_winning:
+        return 0.5
+
+    # Even when "winning" a round, the comeback risk is high
+    # Later rounds with a lead are slightly safer (less time left)
+    base = 0.55
+
+    if round_num >= 4:
+        base = 0.62  # championship rounds, less time for comeback
+    elif round_num == 3:
+        base = 0.58
+
+    if finish_threat:
+        base = min(0.75, base + 0.15)
+
+    # Cap UFC confidence low — variance is extreme
+    return max(0.5, min(0.72, base))
