@@ -395,6 +395,16 @@ def get_single_game_markets(parlay_markets: list) -> list:
 
     log.info("Fetching series: %s", sorted(series_events.keys()))
 
+    # Smart cap: prop/spread series have many lines per game
+    # but we only need a few of the most liquid ones
+    MAX_PER_SERIES = {
+        "KXMLBSPREAD": 30, "KXWCSPREAD": 20, "KXWNBASPREAD": 20,
+        "KXMLBHIT": 20, "KXMLBHR": 15, "KXMLBKS": 20,
+        "KXMLBHRR": 15, "KXMLBTB": 15, "KXWCGOAL": 25,
+        "KXWNBAPTS": 20,
+    }
+    DEFAULT_MAX = 50
+
     api = _get_api()
     if not api:
         log.warning("No Kalshi API available for single game market fetch")
@@ -405,14 +415,19 @@ def get_single_game_markets(parlay_markets: list) -> list:
 
     for series, events in sorted(series_events.items()):
         fetched = 0
-        for event_ticker in events[:30]:  # max 30 events per series
+        series_cap = MAX_PER_SERIES.get(series, DEFAULT_MAX)
+        for event_ticker in events[:30]:
+            if fetched >= series_cap:
+                break
             try:
                 resp = api.get_markets(event_ticker=event_ticker,
-                                       status="open", limit=10)
+                                       status="open", limit=20)
                 if hasattr(resp, "markets") and resp.markets:
                     mkts = [m.to_dict() if hasattr(m, "to_dict") else m
                             for m in resp.markets]
                     for m in mkts:
+                        if fetched >= series_cap:
+                            break
                         ticker = m.get("ticker", "")
                         if ticker and ticker not in seen:
                             seen.add(ticker)
