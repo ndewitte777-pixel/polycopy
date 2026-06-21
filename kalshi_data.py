@@ -227,11 +227,25 @@ def get_market_price(ticker: str) -> tuple[float, float]:
         m = resp.market if hasattr(resp, "market") else resp
         if hasattr(m, "to_dict"):
             m = m.to_dict()
-        # Kalshi prices are in cents (1-99), convert to 0-1 float
-        yes_raw = m.get("yes_ask") or m.get("yes_bid") or m.get("last_price") or 50
-        no_raw = m.get("no_ask") or m.get("no_bid") or (100 - float(yes_raw))
-        yes = float(yes_raw) / 100
-        no = float(no_raw) / 100
+
+        def _parse_price(raw) -> float:
+            """Convert Kalshi price to 0-1 float.
+            Handles: int cents (50), float cents (50.0), dollar string ("0.50")
+            """
+            if raw is None:
+                return 0.5
+            val = float(raw)
+            # If value > 1, it's in cents — divide by 100
+            return val / 100 if val > 1 else val
+
+        yes_raw = (m.get("yes_ask") or m.get("yes_bid") or
+                   m.get("yes_price") or m.get("last_price") or 50)
+        no_raw = m.get("no_ask") or m.get("no_bid") or m.get("no_price")
+
+        yes = _parse_price(yes_raw)
+        no = _parse_price(no_raw) if no_raw else round(1 - yes, 3)
+
+        log.debug("Price for %s: yes=%.3f no=%.3f", ticker, yes, no)
         return yes, no
     except Exception as e:
         log.warning("Price fetch failed for %s: %s", ticker, e)
@@ -350,27 +364,26 @@ def get_single_game_markets(parlay_markets: list) -> list:
     # Only fetch sports markets we actually trade on
     # Skip props (HR, HIT, KS), spreads, crypto
     ALLOWED_SERIES = {
-        "KXMLBGAME",    # MLB winner
-        "KXMLBTOTAL",   # MLB total runs
-        "KXWCGAME",     # World Cup winner
-        "KXWCTOTAL",    # World Cup total goals
-        "KXWCBTTS",     # Both teams score
-        "KXWNBAGAME",   # WNBA winner
-        "KXWNBATOTAL",  # WNBA total points
-        "KXNBAGAME",    # NBA winner
-        "KXNBATOTAL",   # NBA total
-        "KXNFLGAME",    # NFL winner
-        "KXNHLTOTAL",   # NHL total
-        "KXNHLGAME",    # NHL winner
-        "KXUFCFIGHT",   # UFC fight winner
-        "KXPGATOUR",    # PGA tournament winner
-        "KXPGATOP5",    # PGA top 5
-        "KXPGATOP10",   # PGA top 10
-        "KXPGATOP20",   # PGA top 20
-        "KXPGAMAKECUT", # PGA make cut
-        "KXPGAR1LEAD",  # PGA round leader
-        "KXATPMATCH",   # Tennis match winner
-        "KXWTAMATCH",   # WTA match winner
+        # MLB
+        "KXMLBGAME", "KXMLBTOTAL", "KXMLBSPREAD",
+        "KXMLBHIT", "KXMLBHR", "KXMLBKS", "KXMLBHRR", "KXMLBTB", "KXMLBRFI",
+        # World Cup
+        "KXWCGAME", "KXWCTOTAL", "KXWCSPREAD", "KXWCBTTS", "KXWCGOAL",
+        # WNBA
+        "KXWNBAGAME", "KXWNBATOTAL", "KXWNBASPREAD", "KXWNBAPTS",
+        # NBA
+        "KXNBAGAME", "KXNBATOTAL", "KXNBASPREAD", "KXNBAPTS",
+        # NFL
+        "KXNFLGAME", "KXNFLTOTAL", "KXNFLSPREAD",
+        # NHL
+        "KXNHLGAME", "KXNHLTOTAL", "KXNHLSPREAD",
+        # UFC
+        "KXUFCFIGHT",
+        # PGA
+        "KXPGATOUR", "KXPGATOP5", "KXPGATOP10", "KXPGATOP20",
+        "KXPGAMAKECUT", "KXPGAR1LEAD",
+        # Tennis
+        "KXATPMATCH", "KXWTAMATCH",
     }
 
     # Group event tickers by series — only allowed series
