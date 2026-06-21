@@ -162,11 +162,14 @@ def parse_espn_event(event: dict, sport: str) -> dict | None:
         spread = odds.get("details", "")
         over_under = odds.get("overUnder", "")
 
+        # Game date from ESPN
+        game_date = event.get("date", "")[:10]  # "2026-06-21"
+
         return {
             "name": name,
             "short_name": short_name,
             "sport": sport,
-            "state": state,           # "pre", "in", "post"
+            "state": state,
             "is_live": state == "in",
             "is_finished": state == "post",
             "status": status_desc,
@@ -178,6 +181,9 @@ def parse_espn_event(event: dict, sport: str) -> dict | None:
             "spread": spread,
             "over_under": over_under,
             "raw_name": name,
+            "game_date": game_date,
+            # Unique game ID includes date to distinguish series games
+            "game_id": f"{short_name}_{game_date}" if game_date else short_name,
         }
     except Exception as e:
         log.debug("Failed to parse ESPN event: %s", e)

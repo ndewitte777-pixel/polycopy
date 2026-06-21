@@ -611,10 +611,16 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
     Uses pure rules, no Claude API.
     Returns number of positions opened.
     """
-    global _daily_rule_trade_count, _daily_count_date
+    global _daily_rule_trade_count, _daily_count_date, _game_cooldowns
 
     if not live_games or not all_kalshi_markets:
         return 0
+
+    # Restore persisted cooldowns from state (survives restarts)
+    now = time.time()
+    for k, t in state.get("rule_cooldowns", {}).items():
+        if now - t < GAME_COOLDOWN_SECONDS:
+            _game_cooldowns.setdefault(k, t)
 
     # Reset daily count at midnight UTC
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -654,9 +660,11 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
         if not game.get("is_live"):
             continue
 
-        game_id = game.get("raw_name", "") or game.get("short_name", "")
+        # Use date-aware game_id to distinguish series games
+        # e.g. "LAA @ ATH_2026-06-21" not just "LAA @ ATH"
+        game_id = game.get("game_id") or game.get("raw_name", "") or game.get("short_name", "")
 
-        # Cooldown
+        # Cooldown — skip if we recently traded this specific game
         if now - _game_cooldowns.get(game_id, 0) < GAME_COOLDOWN_SECONDS:
             continue
 
@@ -849,6 +857,11 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
             log.debug("Rule trader: already have position on %s", ticker)
             continue
 
+        # Skip if this ticker was recently traded (even after restart)
+        if now - _game_cooldowns.get(ticker, 0) < GAME_COOLDOWN_SECONDS:
+            log.debug("Rule trader: ticker %s in cooldown", ticker[:30])
+            continue
+
         # Skip if this is a parlay ticker or extracted leg from a parlay
         parlay_keywords = ["MULTIGAME", "EXTENDED", "CROSSCATEGORY", "KXMVE"]
         if any(kw in ticker.upper() for kw in parlay_keywords):
@@ -894,7 +907,6 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
         size_usdc = min(max(bankroll * kelly_f, 1.0), MAX_TRADE_USDC)
 
         # ── Statistical EV check ──────────────────────────────────
-        # Evaluate signal using probability models + recent form
         try:
             import stats_models as sm
             eval_result = sm.evaluate_signal(
@@ -908,37 +920,51 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
             ev_data = eval_result.get("ev", {})
             stats_reason = eval_result.get("reason", "")
 
-            # Require positive EV and minimum edge
-            if not eval_result.get("should_trade", False):
+            if not eval_result.get("should_trade", True):
+                log.info("Stats model SKIP %s %s — %s",
+                         game_id, market_type, stats_reason[:80])
+                continue
+
+            # ── Advanced edge detection ──────────────────────────
+            advanced = sm.advanced_evaluate(
+                game=game,
+                market_price=market_price,
+                signal_type=market_type,
+                signal_side=bet_side,
+                base_true_prob=true_prob,
+            )
+
+            # Update true_prob with advanced model
+            true_prob = advanced["true_prob"]
+            edge = advanced["edge"]
+
+            # Boost confidence from advanced layers
+            confidence = min(95, confidence + advanced["confidence_boost"])
+
+            # Adjust trade size from advanced model
+            size_usdc = min(size_usdc * advanced["size_mult"], MAX_TRADE_USDC)
+            size_usdc = max(MIN_BET_SIZE, size_usdc)
+
+            # Skip if advanced model says no edge
+            if not advanced["should_bet"] and true_prob < 0.60:
                 log.info(
-                    "Rule trader: SKIP %s %s — no EV | %s",
-                    game_id, market_type, stats_reason[:80]
+                    "Advanced model SKIP %s — edge=%.1f%% true_prob=%.1f%%",
+                    game_id, edge * 100, true_prob * 100
                 )
                 continue
 
-            # Boost confidence based on model
-            model_conf = eval_result.get("confidence", confidence)
-            confidence = int((confidence + model_conf) / 2)
+            adv_reason = advanced["reasoning_str"]
+            lag = advanced["market_lag"]
 
             log.info(
-                "Stats model: %s | edge=%+.1f%% | EV=%+.1f%% | "
-                "true_prob=%.1f%% | market=%.1f%%",
-                game_id,
-                ev_data.get("edge", 0) * 100,
-                ev_data.get("ev_pct", 0),
-                true_prob * 100,
-                market_price * 100,
+                "Edge: %.1f%% | True: %.1f%% | Market: %.1f%% | %s",
+                edge * 100, true_prob * 100, market_price * 100, adv_reason
             )
+            stats_reason = f"{stats_reason} | {adv_reason}" if stats_reason else adv_reason
 
-            # Size bet by Kelly criterion
-            kelly = eval_result.get("quarter_kelly", 0)
-            if kelly > 0:
-                from config import YOUR_BANKROLL_USDC, MAX_TRADE_USDC
-                bankroll = state.get("bankroll", YOUR_BANKROLL_USDC)
-                kelly_size = bankroll * kelly
-                size_usdc = min(kelly_size, MAX_TRADE_USDC,
-                                size_usdc * 1.3 if kelly > 0.05 else size_usdc)
-                size_usdc = max(MIN_BET_SIZE, size_usdc)
+            # Alert if strong market lag detected
+            if lag.get("strength") in ("STRONG", "MODERATE"):
+                log.info("⚡ MARKET LAG DETECTED: %s", lag.get("reason", ""))
 
         except Exception as e:
             log.debug("Stats model error: %s — using rule confidence", e)
@@ -1027,15 +1053,17 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
             claude_reason = "filter error — proceeding on rules"
 
         log.info(
-            "RULE TRADE | %s | %s %s | rule_conf=%d | claude_conf=%d | $%.2f\n"
+            "RULE TRADE | %s | %s %s | conf=%d | edge=%.1f%% | $%.2f\n"
             "  Rule: %s\n"
             "  Market: %s\n"
+            "  Stats: %s\n"
             "  Claude: %s",
             game.get("short_name", "?"), market_type, bet_side,
-            confidence, claude_confidence, size_usdc,
-            reason,
+            confidence, edge * 100 if 'edge' in dir() else 0,
+            size_usdc, reason,
             target_market.get("question", "?")[:70],
-            claude_reason[:120] if claude_reason else "n/a",
+            stats_reason[:120] if stats_reason else "no model",
+            claude_reason[:100] if claude_reason else "n/a",
         )
 
         resp = executor.place_order(
@@ -1071,7 +1099,12 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
         state["open_positions"] = state.get("open_positions", 0) + 1
         state["daily_trades"] = state.get("daily_trades", 0) + 1
         state["total_at_risk"] = state.get("total_at_risk", 0.0) + size_usdc
+        # Cooldown on both game_id AND ticker to prevent re-entry on same game/market
         _game_cooldowns[game_id] = now
+        _game_cooldowns[ticker] = now
+        # Persist to state so cooldowns survive bot restarts
+        state.setdefault("rule_cooldowns", {})[game_id] = now
+        state.setdefault("rule_cooldowns", {})[ticker] = now
         _daily_rule_trade_count += 1
         entries += 1
 
