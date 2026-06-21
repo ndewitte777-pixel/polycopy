@@ -278,7 +278,9 @@ def format_game_context(game: dict) -> str:
     teams = game.get("teams", [])
     team_strs = []
     for t in teams:
-        team_strs.append(f"{t['name']} ({t['home_away']}): {t['score']}")
+        team_strs.append(
+            f"{t.get('name','?')} ({t.get('home_away','?')}): {t.get('score','0')}"
+        )
 
     score_line = " vs ".join(team_strs)
     clock = game.get("clock", "")
@@ -288,7 +290,8 @@ def format_game_context(game: dict) -> str:
     recent = game.get("recent_plays", [])
     recent_str = ""
     if recent:
-        plays = [f"- {p['period']} {p['clock']}: {p['text']}" for p in recent]
+        plays = [f"- {p.get('period','')} {p.get('clock','')}: {p.get('text','')}"
+                 for p in recent]
         recent_str = "\nRecent scoring:\n" + "\n".join(plays)
 
     sport = game.get("sport", "").upper()

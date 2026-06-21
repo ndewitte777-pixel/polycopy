@@ -844,6 +844,11 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
             log.debug("Rule trader: blocking %s (spread/prop market)", ticker[:40])
             continue
 
+        # Skip if we already have an open position on this ticker
+        if ticker in state.get("open_lots", {}):
+            log.debug("Rule trader: already have position on %s", ticker)
+            continue
+
         # Skip if this is a parlay ticker or extracted leg from a parlay
         parlay_keywords = ["MULTIGAME", "EXTENDED", "CROSSCATEGORY", "KXMVE"]
         if any(kw in ticker.upper() for kw in parlay_keywords):
@@ -1064,6 +1069,8 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
         })
         open_lots[ticker] = lots
         state["open_positions"] = state.get("open_positions", 0) + 1
+        state["daily_trades"] = state.get("daily_trades", 0) + 1
+        state["total_at_risk"] = state.get("total_at_risk", 0.0) + size_usdc
         _game_cooldowns[game_id] = now
         _daily_rule_trade_count += 1
         entries += 1
