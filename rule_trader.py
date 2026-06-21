@@ -1002,23 +1002,20 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
         size_usdc = min(max(bankroll * kelly_f, 1.0), MAX_TRADE_USDC)
 
         # Get real current market price from the matched market
-        # Markets fetched by SDK have yes_ask/yes_bid fields
+        # Need preliminary kalshi_side to know which price to use
+        _prelim_side = "yes" if bet_side in ("YES", "HOME", "OVER") else "no"
         real_yes = (float(target_market.get("yes_ask") or
                          target_market.get("yes_bid") or
                          target_market.get("yes_price") or 0) / 100
                     if (target_market.get("yes_ask") or "") != "" else 0)
         if not real_yes or real_yes <= 0.01 or real_yes >= 0.99:
-            real_yes = market_price  # fall back to default
+            real_yes = market_price
 
-        # Adjust market_price to real price for this side
-        if kalshi_side == "yes" and real_yes > 0.01:
+        if _prelim_side == "yes" and real_yes > 0.01:
             market_price = real_yes
-        elif kalshi_side == "no" and real_yes > 0.01:
+        elif _prelim_side == "no" and real_yes > 0.01:
             market_price = 1 - real_yes
-
-        log.debug("Real market price: %.3f for %s %s", market_price, kalshi_side, ticker)
         try:
-            import stats_models as sm
             eval_result = sm.evaluate_signal(
                 game=game,
                 market_price=market_price,
