@@ -785,7 +785,17 @@ def run():
                 live_games_cache = sd.fetch_all_live_games(session)
                 open_lots = state.setdefault("open_lots", {})
 
+                # DRY-RUN SETTLEMENT: resolve paper trades on finished games
+                # so the journal builds a real win/loss record over the week
+                try:
+                    settled = jnl.settle_finished_games(state, live_games_cache, executor)
+                    if settled:
+                        log.info("Journal: settled %d finished paper trades", settled)
+                except Exception as e:
+                    log.debug("Settlement error: %s", e)
+
                 # Scalper — exit profitable positions
+                slots_freed = 0
                 if open_lots and live_games_cache:
                     scalps = sc.run_scalper(
                         open_lots=open_lots,
@@ -796,7 +806,9 @@ def run():
                         notifier=notifier,
                     )
                     if scalps:
-                        log.info("Scalper: %d positions exited", scalps)
+                        slots_freed = scalps
+                        log.info("Scalper: %d positions exited — %d slots freed for refill",
+                                 scalps, scalps)
 
                 # Live buyer — enter new positions based on momentum
                 if live_games_cache:
@@ -815,6 +827,9 @@ def run():
                         )
                         if entries:
                             log.info("Live buyer: %d new positions opened", entries)
+
+                # Reset daily counters at midnight so all engines share fresh limits
+                st.reset_daily_if_needed(state)
 
                 # Rule-based trader — free, no Claude needed
                 # Pass all markets including parlays so it can extract individual legs

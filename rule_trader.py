@@ -20,7 +20,7 @@ MAX_BET_PRICE = 0.80   # don't bet on anything more expensive than 80 cents (too
 
 # Position limits — quality over quantity
 MAX_OPEN_RULE_POSITIONS = 3   # max 3 open rule trader positions at once
-MAX_DAILY_RULE_TRADES = 8     # max 8 rule trades per day
+MAX_DAILY_RULE_TRADES = 9999  # effectively unlimited; open-position cap controls risk
 
 # Minimum dollar size per bet — no tiny bets
 MIN_BET_SIZE = 1.50
@@ -90,7 +90,7 @@ def _soccer_rules(game: dict) -> list[dict]:
         leader = names[leader_idx]
         signals.append({
             "market_type": "WIN",
-            "bet_side": "HOME" if leader_idx == 0 else "AWAY",
+            "bet_side": (teams[leader_idx].get("home_away","home") or "home").upper(),
             "team": leader,
             "confidence": min(90, 65 + int(elapsed / 5)),
             "reason": f"{leader} leads {scores[leader_idx]}-{scores[1-leader_idx]} "
@@ -118,35 +118,58 @@ def _soccer_rules(game: dict) -> list[dict]:
                 "reason": f"{names[1]} has {100-poss:.0f}% possession, 0-0 after {elapsed:.0f}min",
             })
 
-    # Rule: Late 0-0 → UNDER total goals
-    if total_goals == 0 and elapsed >= 80:
-        signals.append({
-            "market_type": "TOTAL",
-            "bet_side": "UNDER",
-            "team": None,
-            "confidence": 75,
-            "reason": f"0-0 with only {remaining:.0f}min left, UNDER 0.5 goals likely",
-        })
+    # ── TOTAL GOALS LOGIC (pace-aware) ──────────────────────────
+    # The main soccer line is typically O/U 2.5 goals.
+    # We only bet UNDER/OVER when the GAME STATE clearly diverges from
+    # the expected ~2.5 final, and never pre-game or too early.
+    MAIN_LINE = 2.5
 
-    # Rule: Already high scoring → OVER (only fire in 2nd half with clear pace)
-    if total_goals >= 3 and elapsed >= 60:
-        goals_per_90 = total_goals / elapsed * 90
-        if goals_per_90 >= 4.5:  # pace must justify the OVER
-            signals.append({
-                "market_type": "TOTAL",
-                "bet_side": "OVER",
-                "team": None,
-                "confidence": min(78, 60 + int(total_goals * 5)),
-                "reason": f"{total_goals} goals in {elapsed:.0f}min ({goals_per_90:.1f}/90 pace) — OVER likely",
-                "preferred_line": 2.5,
-            })
+    if elapsed >= 30:  # need enough game played to judge pace
+        # Project the final total from current pace
+        goals_per_min = total_goals / max(elapsed, 1)
+        projected_final = total_goals + goals_per_min * remaining
+        # Blend pace projection with base rate (2.5) — early game trusts base more
+        weight_pace = min(1.0, elapsed / 90)
+        expected_final = projected_final * weight_pace + MAIN_LINE * (1 - weight_pace)
+
+        # UNDER: only when projection is well below the next sensible line
+        # AND we're late enough that few goals remain possible
+        if elapsed >= 70 and total_goals <= 1:
+            # The realistic line to bet UNDER is current_total + 1.5
+            under_line = total_goals + 1.5  # e.g. 0 goals → UNDER 1.5, 1 goal → UNDER 2.5
+            # Only bet if expected final is comfortably below the line
+            if expected_final < under_line - 0.4:
+                signals.append({
+                    "market_type": "TOTAL",
+                    "bet_side": "UNDER",
+                    "team": None,
+                    "confidence": min(76, 60 + int((90 - elapsed) * 0)  + int((under_line - expected_final) * 15)),
+                    "reason": f"{total_goals} goals at {elapsed:.0f}min, "
+                              f"projected final {expected_final:.1f} — UNDER {under_line} likely",
+                    "preferred_line": under_line,
+                })
+
+        # OVER: only when pace is high AND projection clears the next line
+        if elapsed >= 40 and total_goals >= 2:
+            over_line = max(2.5, total_goals + 0.5)
+            goals_per_90 = total_goals / elapsed * 90
+            if goals_per_90 >= 3.5 and expected_final > over_line + 0.4:
+                signals.append({
+                    "market_type": "TOTAL",
+                    "bet_side": "OVER",
+                    "team": None,
+                    "confidence": min(78, 58 + int((expected_final - over_line) * 12)),
+                    "reason": f"{total_goals} goals at {elapsed:.0f}min ({goals_per_90:.1f}/90 pace), "
+                              f"projected {expected_final:.1f} — OVER {over_line} likely",
+                    "preferred_line": over_line,
+                })
 
     # Rule: 2+ goal lead late → SPREAD (cover 1.5)
     if abs(scores[0] - scores[1]) >= 2 and elapsed >= 70:
         leader_idx = 0 if scores[0] > scores[1] else 1
         signals.append({
             "market_type": "SPREAD",
-            "bet_side": "HOME" if leader_idx == 0 else "AWAY",
+            "bet_side": (teams[leader_idx].get("home_away","home") or "home").upper(),
             "team": names[leader_idx],
             "confidence": min(80, 62 + int(elapsed / 6)),
             "reason": f"{names[leader_idx]} leads by {abs(scores[0]-scores[1])} "
@@ -176,32 +199,43 @@ def _nba_rules(game: dict) -> list[dict]:
         leader_idx = 0 if scores[0] > scores[1] else 1
         signals.append({
             "market_type": "WIN",
-            "bet_side": "HOME" if leader_idx == 0 else "AWAY",
+            "bet_side": (teams[leader_idx].get("home_away","home") or "home").upper(),
             "team": names[leader_idx],
             "confidence": min(92, 70 + score_diff),
             "reason": f"{names[leader_idx]} up {score_diff} pts with {clock:.1f}min left in 4th",
         })
 
-    # Rule: Pace-based over/under
-    # Expected: ~105 pts per team per 48 min = 210 total
-    elapsed_mins = (period - 1) * 12 + (12 - clock)
-    if elapsed_mins > 0 and period <= 3:
-        pace = (total_pts / elapsed_mins) * 48
-        if pace >= 230:
+    # ── TOTAL POINTS LOGIC (pace-aware) ─────────────────────────
+    # NBA main line ~220.5, WNBA ~165.5. Project final from pace.
+    is_wnba = game.get("sport") == "wnba" or "wnba" in str(game.get("league", "")).lower()
+    main_line = 165.5 if is_wnba else 220.5
+    game_mins = 40 if is_wnba else 48
+
+    elapsed_mins = (period - 1) * (game_mins / 4) + ((game_mins / 4) - clock)
+    if elapsed_mins >= 8 and period <= 3:
+        pace_per_min = total_pts / max(elapsed_mins, 1)
+        projected_final = pace_per_min * game_mins
+        weight = min(1.0, elapsed_mins / game_mins)
+        expected_final = projected_final * weight + main_line * (1 - weight)
+
+        # Only bet when projection clearly diverges from main line
+        if expected_final >= main_line + 12:
             signals.append({
                 "market_type": "TOTAL",
                 "bet_side": "OVER",
                 "team": None,
-                "confidence": 68,
-                "reason": f"Scoring pace of {pace:.0f} pts/game suggests OVER",
+                "confidence": min(74, 58 + int((expected_final - main_line) / 3)),
+                "reason": f"Pace projects {expected_final:.0f} pts (line ~{main_line}) — OVER",
+                "preferred_line": main_line,
             })
-        elif pace <= 190:
+        elif expected_final <= main_line - 12:
             signals.append({
                 "market_type": "TOTAL",
                 "bet_side": "UNDER",
                 "team": None,
-                "confidence": 68,
-                "reason": f"Scoring pace of {pace:.0f} pts/game suggests UNDER",
+                "confidence": min(74, 58 + int((main_line - expected_final) / 3)),
+                "reason": f"Pace projects {expected_final:.0f} pts (line ~{main_line}) — UNDER",
+                "preferred_line": main_line,
             })
 
     # Rule: Large lead in 4th → SPREAD cover
@@ -209,7 +243,7 @@ def _nba_rules(game: dict) -> list[dict]:
         leader_idx = 0 if scores[0] > scores[1] else 1
         signals.append({
             "market_type": "SPREAD",
-            "bet_side": "HOME" if leader_idx == 0 else "AWAY",
+            "bet_side": (teams[leader_idx].get("home_away","home") or "home").upper(),
             "team": names[leader_idx],
             "confidence": min(82, 64 + score_diff),
             "reason": f"{names[leader_idx]} up {score_diff} with {clock:.1f}min left "
@@ -240,30 +274,38 @@ def _nfl_rules(game: dict) -> list[dict]:
         leader_idx = 0 if scores[0] > scores[1] else 1
         signals.append({
             "market_type": "WIN",
-            "bet_side": "HOME" if leader_idx == 0 else "AWAY",
+            "bet_side": (teams[leader_idx].get("home_away","home") or "home").upper(),
             "team": names[leader_idx],
             "confidence": min(90, 72 + int(score_diff / 3)),
             "reason": f"{names[leader_idx]} up {score_diff} pts with {clock:.1f}min in 4th",
         })
 
-    # Rule: Pace for over/under (expected ~45 pts total)
-    if elapsed_mins > 0 and period <= 3:
-        pace = (total_pts / elapsed_mins) * 60
-        if pace >= 55:
+    # ── TOTAL POINTS LOGIC (pace-aware) ─────────────────────────
+    # NFL main line ~44.5. Project from pace, only bet on clear divergence.
+    MAIN_LINE = 44.5
+    if elapsed_mins >= 12 and period <= 3:
+        pace_per_min = total_pts / max(elapsed_mins, 1)
+        projected_final = pace_per_min * 60
+        weight = min(1.0, elapsed_mins / 60)
+        expected_final = projected_final * weight + MAIN_LINE * (1 - weight)
+
+        if expected_final >= MAIN_LINE + 7:
             signals.append({
                 "market_type": "TOTAL",
                 "bet_side": "OVER",
                 "team": None,
-                "confidence": 66,
-                "reason": f"Scoring pace of {pace:.0f} pts/game suggests OVER",
+                "confidence": min(72, 56 + int((expected_final - MAIN_LINE) / 2)),
+                "reason": f"Pace projects {expected_final:.0f} pts (line ~{MAIN_LINE}) — OVER",
+                "preferred_line": MAIN_LINE,
             })
-        elif pace <= 34:
+        elif expected_final <= MAIN_LINE - 7:
             signals.append({
                 "market_type": "TOTAL",
                 "bet_side": "UNDER",
                 "team": None,
-                "confidence": 66,
-                "reason": f"Scoring pace of {pace:.0f} pts/game suggests UNDER",
+                "confidence": min(72, 56 + int((MAIN_LINE - expected_final) / 2)),
+                "reason": f"Pace projects {expected_final:.0f} pts (line ~{MAIN_LINE}) — UNDER",
+                "preferred_line": MAIN_LINE,
             })
 
     # Rule: Two-score lead late → SPREAD cover
@@ -271,7 +313,7 @@ def _nfl_rules(game: dict) -> list[dict]:
         leader_idx = 0 if scores[0] > scores[1] else 1
         signals.append({
             "market_type": "SPREAD",
-            "bet_side": "HOME" if leader_idx == 0 else "AWAY",
+            "bet_side": (teams[leader_idx].get("home_away","home") or "home").upper(),
             "team": names[leader_idx],
             "confidence": min(82, 66 + int(score_diff / 3)),
             "reason": f"{names[leader_idx]} up {score_diff} with {clock:.1f}min "
@@ -300,43 +342,61 @@ def _mlb_rules(game: dict) -> list[dict]:
         leader_idx = 0 if scores[0] > scores[1] else 1
         signals.append({
             "market_type": "WIN",
-            "bet_side": "HOME" if leader_idx == 0 else "AWAY",
+            "bet_side": (teams[leader_idx].get("home_away","home") or "home").upper(),
             "team": names[leader_idx],
             "confidence": min(88, 65 + score_diff * 4),
             "reason": f"{names[leader_idx]} leads {scores[leader_idx]}-{scores[1-leader_idx]} "
                       f"in inning {period}",
         })
 
-    # Rule: High run pace → OVER (only fire after inning 5, before inning 9)
-    if 5 <= period <= 8 and total_runs >= 8:
-        pace = total_runs / period * 9
-        signals.append({
-            "market_type": "TOTAL",
-            "bet_side": "OVER",
-            "team": None,
-            "confidence": min(75, 60 + int(total_runs)),
-            "reason": f"{total_runs} runs through {period} innings ({pace:.1f}/9 pace) — OVER likely",
-            "preferred_line": 8.5,
-        })
+    # ── TOTAL RUNS LOGIC (pace-aware) ───────────────────────────
+    # MLB main line is typically O/U 8.5 runs.
+    # Project final runs from current pace and only bet when it
+    # clearly diverges from the realistic line.
+    MAIN_LINE = 8.5
 
-    # Rule: Low scoring → UNDER (only fire after inning 6, before inning 9)
-    if 6 <= period <= 8 and total_runs <= 1:
-        signals.append({
-            "market_type": "TOTAL",
-            "bet_side": "UNDER",
-            "team": None,
-            "confidence": 72,
-            "reason": f"Only {total_runs} runs through {period} innings — UNDER likely",
-            "preferred_line": 7.5,
-        })
+    if 4 <= period <= 8:
+        runs_per_inning = total_runs / max(period, 1)
+        innings_left = 9 - period
+        projected_final = total_runs + runs_per_inning * innings_left
+        # Blend with base rate — earlier innings trust the base more
+        weight = min(1.0, period / 9)
+        expected_final = projected_final * weight + MAIN_LINE * (1 - weight)
+
+        # OVER: high pace, projection clears a sensible line
+        if total_runs >= 7 and period >= 5:
+            over_line = max(8.5, total_runs + 0.5)
+            if expected_final > over_line + 0.5:
+                signals.append({
+                    "market_type": "TOTAL",
+                    "bet_side": "OVER",
+                    "team": None,
+                    "confidence": min(76, 58 + int((expected_final - over_line) * 6)),
+                    "reason": f"{total_runs} runs through {period} "
+                              f"(proj {expected_final:.1f}) — OVER {over_line} likely",
+                    "preferred_line": over_line,
+                })
+
+        # UNDER: low pace late, projection well below line
+        if total_runs <= 3 and period >= 6:
+            under_line = max(7.5, total_runs + 4.5)
+            if expected_final < under_line - 0.5:
+                signals.append({
+                    "market_type": "TOTAL",
+                    "bet_side": "UNDER",
+                    "team": None,
+                    "confidence": min(74, 58 + int((under_line - expected_final) * 5)),
+                    "reason": f"Only {total_runs} runs through {period} "
+                              f"(proj {expected_final:.1f}) — UNDER {under_line} likely",
+                    "preferred_line": under_line,
+                })
 
     # Rule: Big late lead → SPREAD (likely to cover a small margin)
-    # Only when lead is large enough to safely cover 1.5 runs late
     if period >= 8 and score_diff >= 3:
         leader_idx = 0 if scores[0] > scores[1] else 1
         signals.append({
             "market_type": "SPREAD",
-            "bet_side": "HOME" if leader_idx == 0 else "AWAY",
+            "bet_side": (teams[leader_idx].get("home_away","home") or "home").upper(),
             "team": names[leader_idx],
             "confidence": min(80, 60 + score_diff * 4),
             "reason": f"{names[leader_idx]} leads by {score_diff} in inning {period} "
@@ -362,16 +422,46 @@ def _nhl_rules(game: dict) -> list[dict]:
     elapsed = (period - 1) * 20 + (20 - clock)
     remaining = max(0, 60 - elapsed)
 
+    total_goals = sum(scores)
+
     if score_diff >= 2 and elapsed >= 40:
         leader_idx = 0 if scores[0] > scores[1] else 1
         signals.append({
             "market_type": "WIN",
-            "bet_side": "HOME" if leader_idx == 0 else "AWAY",
+            "bet_side": (teams[leader_idx].get("home_away","home") or "home").upper(),
             "team": names[leader_idx],
             "confidence": min(88, 68 + int(elapsed / 5)),
             "reason": f"{names[leader_idx]} leads {scores[leader_idx]}-{scores[1-leader_idx]} "
                       f"with {remaining:.0f}min left",
         })
+
+    # ── TOTAL GOALS LOGIC (pace-aware) ──────────────────────────
+    # NHL main line ~5.5 goals. Project final from pace.
+    MAIN_LINE = 5.5
+    if elapsed >= 20 and period <= 3:
+        pace_per_min = total_goals / max(elapsed, 1)
+        projected_final = pace_per_min * 60
+        weight = min(1.0, elapsed / 60)
+        expected_final = projected_final * weight + MAIN_LINE * (1 - weight)
+
+        if expected_final >= MAIN_LINE + 1.2:
+            signals.append({
+                "market_type": "TOTAL",
+                "bet_side": "OVER",
+                "team": None,
+                "confidence": min(72, 56 + int((expected_final - MAIN_LINE) * 6)),
+                "reason": f"Pace projects {expected_final:.1f} goals (line ~{MAIN_LINE}) — OVER",
+                "preferred_line": MAIN_LINE,
+            })
+        elif expected_final <= MAIN_LINE - 1.2:
+            signals.append({
+                "market_type": "TOTAL",
+                "bet_side": "UNDER",
+                "team": None,
+                "confidence": min(72, 56 + int((MAIN_LINE - expected_final) * 6)),
+                "reason": f"Pace projects {expected_final:.1f} goals (line ~{MAIN_LINE}) — UNDER",
+                "preferred_line": MAIN_LINE,
+            })
 
     # Rule: 2+ goal lead in 3rd period → SPREAD (puck line 1.5)
     # Empty-net goals often pad the lead late, making the cover likely
@@ -379,7 +469,7 @@ def _nhl_rules(game: dict) -> list[dict]:
         leader_idx = 0 if scores[0] > scores[1] else 1
         signals.append({
             "market_type": "SPREAD",
-            "bet_side": "HOME" if leader_idx == 0 else "AWAY",
+            "bet_side": (teams[leader_idx].get("home_away","home") or "home").upper(),
             "team": names[leader_idx],
             "confidence": min(80, 64 + int(elapsed / 6)),
             "reason": f"{names[leader_idx]} leads by {score_diff} in P{period} "
@@ -424,7 +514,7 @@ def _tennis_rules(game: dict) -> list[dict]:
             confidence = 80 if abs(set_diff) >= 2 else 70
             signals.append({
                 "market_type": "WIN",
-                "bet_side": "HOME" if leader_idx == 0 else "AWAY",
+                "bet_side": (teams[leader_idx].get("home_away","home") or "home").upper(),
                 "team": teams[leader_idx].get("name"),
                 "confidence": confidence,
                 "reason": f"{teams[leader_idx].get('name')} leads {leader_sets} sets to {sets[1-leader_idx]}, one set from victory",
@@ -771,6 +861,25 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
     if not live_games or not all_kalshi_markets:
         return 0
 
+    # HARD STOP: daily loss limit applies to ALL engines including rule trader
+    from config import MAX_DAILY_LOSS_USDC, MAX_DAILY_TRADES
+    if state.get("daily_loss", 0) >= MAX_DAILY_LOSS_USDC:
+        log.warning("Rule trader halted: daily loss $%.2f >= limit $%.2f",
+                    state.get("daily_loss", 0), MAX_DAILY_LOSS_USDC)
+        return 0
+
+    # HARD STOP: combined daily trade limit across all engines
+    if state.get("daily_trades", 0) >= MAX_DAILY_TRADES:
+        log.info("Rule trader halted: daily trade limit %d reached",
+                 MAX_DAILY_TRADES)
+        return 0
+
+    # Balance floor — never trade below $2
+    if state.get("bankroll", 25.0) < 2.00:
+        log.warning("Rule trader halted: balance $%.2f too low",
+                    state.get("bankroll", 0))
+        return 0
+
     # Restore persisted cooldowns from state (survives restarts)
     now = time.time()
     for k, t in state.get("rule_cooldowns", {}).items():
@@ -811,6 +920,21 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
         log.warning("Rule trader: balance $%.2f too low to trade safely — stopping", bankroll)
         return 0
 
+    # Pre-rank live games by their strongest available signal so that when
+    # slots are limited, the BEST opportunities across all games get filled
+    # first — not just whichever game happened to be looped first.
+    def _best_signal_conf(g):
+        if not g.get("is_live"):
+            return -1
+        try:
+            sigs = analyze_game(g)
+            sigs = [s for s in sigs if s["confidence"] >= MIN_RULE_CONFIDENCE]
+            return max((s["confidence"] for s in sigs), default=-1)
+        except Exception:
+            return -1
+
+    live_games = sorted(live_games, key=_best_signal_conf, reverse=True)
+
     for game in live_games:
         if not game.get("is_live"):
             continue
@@ -823,10 +947,14 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
         if now - _game_cooldowns.get(game_id, 0) < GAME_COOLDOWN_SECONDS:
             continue
 
-        # Safety limits
-        if state.get("open_positions", 0) >= 10:
+        # Safety limits — use the real configured values, not hardcoded
+        from config import MAX_DAILY_LOSS_USDC, MAX_OPEN_POSITIONS
+        if state.get("open_positions", 0) >= MAX_OPEN_POSITIONS:
+            log.info("Rule trader: max open positions (%d) reached", MAX_OPEN_POSITIONS)
             break
-        if state.get("daily_loss", 0) >= 100:
+        if state.get("daily_loss", 0) >= MAX_DAILY_LOSS_USDC:
+            log.warning("Rule trader: daily loss limit hit ($%.2f >= $%.2f) — stopping",
+                        state.get("daily_loss", 0), MAX_DAILY_LOSS_USDC)
             break
 
         signals = analyze_game(game)
@@ -936,6 +1064,11 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
                 q = m.get("question", m.get("title", "")).lower()
                 match_score = match_game_to_market(game, q, ticker)
 
+                # CRITICAL: if teams/date don't match, skip entirely.
+                # Don't let line-proximity bonuses rescue a wrong-game market.
+                if match_score < 0.4:
+                    continue
+
                 if market_type == "TOTAL" and any(w in q for w in ["over", "under", "total", "goals", "runs", "points", "winner"]):
                     import re as _re2
                     ticker_line_match = _re2.search(r'-(\d+\.?\d*)$', ticker)
@@ -965,10 +1098,23 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
                     if line_val > max_total:
                         continue
 
-                    # Prefer line closest to current score + ~2 more runs
-                    target_line = current_total + 2
+                    # Prefer line closest to preferred_line if signal specified one,
+                    # otherwise closest to current score + buffer
+                    pref = best.get("preferred_line", 0)
+                    if pref:
+                        # HARD GUARD: reject lines more than 1.0 from preferred.
+                        # Prevents betting UNDER 1.5 when the rule wanted UNDER 2.5
+                        if abs(line_val - pref) > 1.0:
+                            continue
+                        target_line = pref
+                    else:
+                        target_line = current_total + 2
                     proximity = 1 / (1 + abs(line_val - target_line))
-                    match_score += 0.25 + proximity * 0.15
+                    # Strong boost when line matches preferred exactly
+                    if pref and abs(line_val - pref) <= 0.25:
+                        match_score += 0.5
+                    else:
+                        match_score += 0.20 + proximity * 0.15
                 elif market_type == "SPREAD" and "spread" in q:
                     # Filter spread lines — only realistic margins
                     # Extract the number from question e.g. "wins by more than 3.5" → 3.5
@@ -1058,6 +1204,19 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
                      market_price, MIN_BET_PRICE, MAX_BET_PRICE, game_id)
             continue
 
+        # Minimum payout filter — reject trades where the upside is too small
+        # relative to what's risked. payout_ratio = profit / amount risked.
+        # At price 0.80 → win $0.20 per $0.80 risked = 0.25 ratio.
+        # At price 0.95 → win $0.05 per $0.95 risked = 0.053 ratio → rejected.
+        from config import MIN_PAYOUT_RATIO
+        payout_ratio = (1 - market_price) / market_price if market_price > 0 else 0
+        if payout_ratio < MIN_PAYOUT_RATIO:
+            log.info("Rule trader: skipping %s — payout only %.0f%% "
+                     "(need %.0f%%), price %.2f pays %.2fx",
+                     game_id, payout_ratio * 100, MIN_PAYOUT_RATIO * 100,
+                     market_price, 1 + payout_ratio)
+            continue
+
         # Simple Kelly sizing based on confidence edge
         implied_edge = (confidence / 100) - market_price
         if implied_edge <= 0:
@@ -1068,6 +1227,26 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
         kelly_f = max(0, (my_prob * (b + 1) - 1) / b) * KELLY_FRACTION
         bankroll = state.get("bankroll", 25.0)
         size_usdc = min(max(bankroll * kelly_f, 1.0), MAX_TRADE_USDC)
+
+        # Size UP to hit the minimum profit target if needed.
+        # profit = size * payout_ratio, so size_needed = MIN_PROFIT / payout_ratio
+        from config import MIN_PROFIT_USDC
+        payout_ratio = (1 - market_price) / market_price if market_price > 0 else 0
+        if payout_ratio > 0:
+            size_for_profit = MIN_PROFIT_USDC / payout_ratio
+            # Bump size up to reach the profit floor, but never past the hard cap
+            size_usdc = max(size_usdc, size_for_profit)
+            size_usdc = min(size_usdc, MAX_TRADE_USDC)
+
+            # If even the max stake can't reach the profit floor, the trade isn't
+            # worth it — skip rather than place an under-target bet
+            max_possible_profit = size_usdc * payout_ratio
+            if max_possible_profit < MIN_PROFIT_USDC - 0.01:
+                log.info("Rule trader: skipping %s — max profit $%.2f at price %.2f "
+                         "below $%.2f floor (would need $%.2f stake)",
+                         game_id, max_possible_profit, market_price,
+                         MIN_PROFIT_USDC, size_for_profit)
+                continue
 
         # Get real current market price from the matched market
         # Need preliminary kalshi_side to know which price to use
@@ -1150,7 +1329,56 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
         # Enforce minimum bet size — no tiny bets
         size_usdc = max(size_usdc, MIN_BET_SIZE)
 
-        kalshi_side = "YES" if bet_side in ("YES", "HOME", "OVER") else "NO"
+        # Re-assert the minimum-profit stake (the advanced model's size_mult
+        # above may have shrunk it). This is the final word on profit floor.
+        from config import MIN_PROFIT_USDC
+        _pr = (1 - market_price) / market_price if market_price > 0 else 0
+        if _pr > 0:
+            size_usdc = max(size_usdc, MIN_PROFIT_USDC / _pr)
+            size_usdc = min(size_usdc, MAX_TRADE_USDC)
+
+        # CASH RESERVE: never let total open exposure exceed (1 - reserve) of bankroll.
+        # With $3-4 bets this keeps the account from being over-committed.
+        try:
+            from config import CASH_RESERVE_PCT
+            bankroll = state.get("bankroll", 25.0)
+            at_risk = state.get("total_at_risk", 0.0)
+            max_exposure = bankroll * (1 - CASH_RESERVE_PCT)
+            available = max_exposure - at_risk
+            if available < MIN_BET_SIZE:
+                log.info("Rule trader: cash reserve reached "
+                         "($%.2f at risk, $%.2f cap) — holding", at_risk, max_exposure)
+                break
+            if size_usdc > available:
+                # Trim to fit, but only if the trimmed bet still hits profit floor
+                trimmed_profit = available * _pr if _pr > 0 else 0
+                if trimmed_profit < MIN_PROFIT_USDC - 0.01:
+                    log.info("Rule trader: skipping %s — only $%.2f available under "
+                             "cash reserve, can't reach $%.2f profit floor",
+                             game_id, available, MIN_PROFIT_USDC)
+                    continue
+                size_usdc = available
+        except Exception as e:
+            log.debug("Cash reserve check error: %s", e)
+
+        # HOUSE MONEY: once the daily goal is hit, only risk the overflow.
+        # E.g. goal $5, made $6.50 → only $1.50 is riskable.
+        try:
+            import profit_targets as pt
+            net = pt.st.net_daily_pnl(state)
+            target = pt.get_daily_target()
+            if net >= target:
+                overflow = net - target
+                if overflow < MIN_BET_SIZE:
+                    log.info("Daily goal $%.2f locked — overflow $%.2f below min bet, "
+                             "stopping for the day", target, overflow)
+                    break
+                if overflow < size_usdc:
+                    log.info("House money: capping bet to overflow $%.2f (goal $%.2f locked)",
+                             overflow, target)
+                    size_usdc = overflow
+        except Exception as e:
+            log.debug("Profit target check error: %s", e)
 
         # For WIN markets, the ticker suffix tells us who YES is
         # e.g. KXMLBGAME-26JUN202210BOSSEA-SEA → suffix=SEA → YES=SEA wins
@@ -1297,17 +1525,54 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
         _daily_rule_trade_count += 1
         entries += 1
 
+        # Record this trade in the journal so the dry-run produces real data.
+        # Captures everything needed to later judge if the signal had an edge.
+        try:
+            import journal as _jnl
+            _jnl.record_signal(state, {
+                "type": "rule",
+                "source": "rule_trader",
+                "sport": game.get("sport", "?"),
+                "game": game.get("short_name", "?"),
+                "market": target_market.get("question", "?"),
+                "ticker": ticker,
+                "market_type": market_type,
+                "side": kalshi_side,
+                "price": round(market_price, 3),
+                "size": round(size_usdc, 2),
+                "true_prob": round(true_prob, 3) if 'true_prob' in dir() else None,
+                "edge": round(edge, 3) if 'edge' in dir() else None,
+                "claude_confidence": claude_confidence,
+                "rule_confidence": confidence,
+                "potential_profit": round(size_usdc * ((1 - market_price) / market_price), 2)
+                                    if market_price > 0 else 0,
+                "rule": reason[:100],
+                "action": "placed",
+                "timestamp": now,
+            })
+        except Exception as e:
+            log.debug("Journal record error: %s", e)
+
         # Build comprehensive notification with all the math
         edge_str = f"{edge*100:+.1f}%" if 'edge' in dir() else "n/a"
         true_prob_str = f"{true_prob*100:.0f}%" if 'true_prob' in dir() else "n/a"
-        game_score = format_game_context(game).split("\n")[1] if game else ""
+        try:
+            ctx_lines = format_game_context(game).split("\n")
+            game_score = ctx_lines[1] if len(ctx_lines) > 1 else game.get("short_name", "?")
+        except Exception:
+            game_score = game.get("short_name", "?")
 
+        # Show both the live game AND the exact Kalshi market for verification
         notifier.send(
-            title=f"📊 {kalshi_side} {game.get('short_name','?')} | {claude_confidence}% conf",
+            title=f"📊 {kalshi_side} | {game.get('short_name','?')} | {claude_confidence}%",
             message=(
-                f"🎯 {target_market.get('question','?')}\n"
-                f"━━━━━━━━━━━━━━━\n"
+                f"🏟️ LIVE GAME: {game.get('short_name','?')}\n"
                 f"📍 {game_score}\n"
+                f"━━━━━━━━━━━━━━━\n"
+                f"🎯 KALSHI MARKET:\n"
+                f"{target_market.get('question','?')}\n"
+                f"Ticker: {ticker}\n"
+                f"━━━━━━━━━━━━━━━\n"
                 f"💵 Bet: {kalshi_side} @ {market_price:.2f} | ${size_usdc:.2f}\n"
                 f"━━━━━━━━━━━━━━━\n"
                 f"📐 THE MATH:\n"
