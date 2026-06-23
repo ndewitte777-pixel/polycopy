@@ -926,10 +926,24 @@ def run():
 
         except Exception as e:
             consecutive_errors += 1
+            import traceback as _tb
+            tb_str = _tb.format_exc()
             log.exception("Error in main loop (#%d): %s", consecutive_errors, e)
+            # Log the full traceback explicitly so it's easy to find
+            log.error("FULL TRACEBACK:\n%s", tb_str)
             if consecutive_errors >= ERROR_ALERT_THRESHOLD:
+                # Include the last frame of the traceback so the notification
+                # actually tells you WHERE the error is, not just the type
+                tb_lines = tb_str.strip().split("\n")
+                location = ""
+                for line in reversed(tb_lines):
+                    if "File " in line and "/app/" in line:
+                        location = line.strip()
+                        break
                 notifier.notify_error(
-                    f"{consecutive_errors} consecutive errors:\n{type(e).__name__}: {e}"
+                    f"{consecutive_errors} consecutive errors:\n"
+                    f"{type(e).__name__}: {e}\n"
+                    f"{location}"
                 )
                 consecutive_errors = 0  # reset after alert
 
