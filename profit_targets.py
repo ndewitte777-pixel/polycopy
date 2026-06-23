@@ -104,6 +104,35 @@ def should_trade(phase: str) -> bool:
     return phase in ("HUNTING", "BUILDING", "PROTECTING")
 
 
+def max_risk_this_trade(state: dict, default_size: float) -> float:
+    """
+    House-money rule: once the daily profit target is reached, the bot
+    locks the target amount and may only risk profit EARNED ABOVE it.
+
+    Example: target is $5. Bot has made $6.50 net today.
+    - $5.00 is locked (protected, never risked)
+    - $1.50 overflow can be bet
+    - So this trade is capped at min(default_size, $1.50)
+
+    Below target: normal sizing (the daily-loss limit is the protection).
+    Above target with no overflow left: returns 0 (stop).
+    """
+    target = get_daily_target()
+    net = st.net_daily_pnl(state)
+
+    # Haven't hit the goal yet — trade normally, daily-loss limit protects us
+    if net < target:
+        return default_size
+
+    # Goal reached — only the overflow above target is riskable
+    overflow = net - target
+    if overflow <= 0:
+        return 0.0  # exactly at goal, nothing extra to risk — stop for the day
+
+    # Risk at most the overflow, never more than the normal size
+    return min(default_size, overflow)
+
+
 def status_line(state: dict) -> str:
     st.reset_daily_if_needed(state)
     target = get_daily_target()

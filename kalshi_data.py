@@ -296,7 +296,7 @@ def _extract_event_tickers(markets: list) -> set:
 
 _single_game_cache: list = []
 _single_game_cache_time: float = 0.0
-_SINGLE_GAME_CACHE_TTL = 120  # refresh every 2 minutes
+_SINGLE_GAME_CACHE_TTL = 300  # refresh every 5 minutes
 
 
 def get_single_game_markets(parlay_markets: list) -> list:
