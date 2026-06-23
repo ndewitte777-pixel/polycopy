@@ -1388,6 +1388,12 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
         except Exception as e:
             log.debug("Profit target check error: %s", e)
 
+        # Default side mapping: YES for HOME/OVER/YES bets, NO for AWAY/UNDER/NO.
+        # WIN markets refine this below using the ticker suffix; TOTAL/SPREAD/PROP
+        # use this default directly. Setting it here ensures kalshi_side is always
+        # defined regardless of market type.
+        kalshi_side = "yes" if bet_side in ("YES", "HOME", "OVER") else "no"
+
         # For WIN markets, the ticker suffix tells us who YES is
         # e.g. KXMLBGAME-26JUN202210BOSSEA-SEA → suffix=SEA → YES=SEA wins
         # e.g. KXMLBGAME-26JUN202205LAAATH-LAA → suffix=LAA → YES=LAA wins
