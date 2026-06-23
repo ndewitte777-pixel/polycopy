@@ -279,3 +279,98 @@ class Executor:
         except Exception as e:
             log.error("Polymarket order failed: %s", e)
             return {"error": str(e)}
+
+
+    def place_limit_sell(self, ticker: str, position_side: str,
+                          target_price: float, count: int) -> dict:
+        """
+        Place a RESTING limit sell order (take-profit) that fills automatically
+        when the market reaches target_price. No polling needed.
+
+        ticker: Kalshi market ticker
+        position_side: "yes" or "no" — which side we HOLD and want to sell
+        target_price: the YES-equivalent price at which to sell (0-1)
+        count: number of contracts to sell
+
+        On Kalshi, selling a YES position = placing an 'ask' on YES.
+        Selling a NO position = placing a 'bid'... handled via side mapping.
+        """
+        if DRY_RUN:
+            log.info("[DRY RUN] LIMIT SELL %s %s @ %.2f x%d (resting take-profit)",
+                     ticker, position_side, target_price, count)
+            return {"dry_run": True, "status": "resting", "target": target_price}
+
+        if self.exchange != "kalshi":
+            log.debug("Limit sell only implemented for Kalshi")
+            return {"skipped": True}
+
+        import uuid, base64, time as _t, requests as _rq, os
+
+        pos = (position_side or "yes").lower()
+        # To CLOSE a yes position you SELL yes = "ask" on yes side.
+        # To CLOSE a no position you SELL no = "ask" on no side.
+        # Kalshi expresses sell orders with the same side as the position held,
+        # using action=sell.
+        price_for_side = target_price if pos == "yes" else (1 - target_price)
+        price_cents = max(1, min(99, int(round(price_for_side * 100))))
+
+        api_key = os.environ.get("KALSHI_API_KEY_ID", "")
+        private_key_pem = os.environ.get("KALSHI_PRIVATE_KEY", "")
+        base = "https://api.elections.kalshi.com/trade-api/v2"
+        path = "/trade-api/v2/portfolio/events/orders"
+
+        try:
+            from cryptography.hazmat.primitives.serialization import load_pem_private_key
+            from cryptography.hazmat.primitives import hashes
+            from cryptography.hazmat.primitives.asymmetric import padding as _pad
+            pem = private_key_pem.strip()
+            if not pem.startswith("-----"):
+                pem = f"-----BEGIN PRIVATE KEY-----\n{pem}\n-----END PRIVATE KEY-----"
+            elif "\\n" in pem:
+                pem = pem.replace("\\n", "\n")
+            key = load_pem_private_key(pem.encode(), password=None)
+            ts = str(int(_t.time() * 1000))
+            sig = key.sign(
+                (ts + "POST" + path).encode(),
+                _pad.PSS(mgf=_pad.MGF1(hashes.SHA256()),
+                         salt_length=_pad.PSS.MAX_LENGTH),
+                hashes.SHA256(),
+            )
+            headers = {
+                "KALSHI-ACCESS-KEY": api_key,
+                "KALSHI-ACCESS-TIMESTAMP": ts,
+                "KALSHI-ACCESS-SIGNATURE": base64.b64encode(sig).decode(),
+                "Content-Type": "application/json",
+            }
+        except Exception as e:
+            log.error("Limit-sell auth error: %s", e)
+            return {"error": str(e)}
+
+        # action=sell closes the position we hold on `pos` side
+        body = {
+            "ticker": ticker,
+            "client_order_id": str(uuid.uuid4()),
+            "action": "sell",
+            "side": pos,                       # the side we hold
+            "count": str(int(count)),
+            "price": f"{price_for_side:.4f}",
+            "time_in_force": "good_till_canceled",
+            "self_trade_prevention_type": "taker_at_cross",
+        }
+
+        try:
+            r = _rq.post(f"{base}/portfolio/events/orders",
+                         headers=headers, json=body, timeout=10)
+            if r.status_code in (200, 201):
+                data = r.json()
+                order_id = data.get("order", {}).get("order_id", "") or data.get("order_id", "")
+                log.info("✅ Resting take-profit placed: SELL %s %s @ %.2f x%d (order %s)",
+                         ticker, pos, target_price, count, order_id[:8] if order_id else "?")
+                return {"resting": True, "order_id": order_id,
+                        "target_price": target_price, "count": count}
+            else:
+                log.error("Limit sell failed %d: %s", r.status_code, r.text[:200])
+                return {"error": r.text[:200]}
+        except Exception as e:
+            log.error("Limit sell request failed: %s", e)
+            return {"error": str(e)}

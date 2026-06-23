@@ -63,7 +63,7 @@ PROFIT_PROTECTION_PCT = float(os.environ.get("PROFIT_PROTECTION_PCT", "50.0"))
 
 
 USE_LIVE_SCALPER = os.environ.get("USE_LIVE_SCALPER", "true").lower() == "true"
-LIVE_POLL_INTERVAL = int(os.environ.get("LIVE_POLL_INTERVAL", "20"))  # seconds between live checks
+LIVE_POLL_INTERVAL = int(os.environ.get("LIVE_POLL_INTERVAL", "15"))  # seconds between live checks
 SCALP_PROFIT_PCT = float(os.environ.get("SCALP_PROFIT_PCT", "15.0"))  # % gain to trigger scalp exit
 SCALP_MIN_CENTS = float(os.environ.get("SCALP_MIN_CENTS", "0.05"))    # $0.05 absolute price gain
 
@@ -87,10 +87,41 @@ CONVICTION_SIZE_MULTIPLIER = 1.5  # multiply your_size by this on high convictio
 
 # ---- Position sizing ----
 COPY_SCALE_FACTOR = 1.0
-MAX_TRADE_USDC = float(os.environ.get("MAX_TRADE_USDC", "3"))
+MAX_TRADE_USDC = float(os.environ.get("MAX_TRADE_USDC", "4"))
 MAX_DAILY_LOSS_USDC = float(os.environ.get("MAX_DAILY_LOSS_USDC", "10"))
 MAX_OPEN_POSITIONS = int(os.environ.get("MAX_OPEN_POSITIONS", "5"))
-MAX_DAILY_TRADES = int(os.environ.get("MAX_DAILY_TRADES", "10"))
+# Daily trade count is effectively unlimited — the open-position cap and
+# daily-loss limit are the real risk controls. Set a Railway env var to cap it.
+MAX_DAILY_TRADES = int(os.environ.get("MAX_DAILY_TRADES", "9999"))
+
+# Minimum payout ratio — reject trades that don't pay enough relative to risk.
+# 0.25 means the potential profit must be at least 25% of the amount risked.
+# E.g. at price 0.80 you risk $1 to make $0.25 (25%) — that's the floor.
+# A 1.05x trade (price ~0.95, only ~5% profit) is rejected.
+# Raise this to be pickier (0.40 = need 40%+ upside), lower to allow safer favorites.
+MIN_PAYOUT_RATIO = float(os.environ.get("MIN_PAYOUT_RATIO", "0.25"))
+
+# Minimum profit per trade (absolute dollars). The bot sizes the bet UP so the
+# potential profit is at least this much. E.g. at price 0.75 (pays 0.33x) it must
+# stake $3 to make $1. Capped by MAX_TRADE_USDC so it can't size up without bound.
+# WARNING on a small account: a $1 profit floor can push single bets to ~$4
+# (15%+ of a $25 account). The daily-loss limit will trip faster as a result.
+MIN_PROFIT_USDC = float(os.environ.get("MIN_PROFIT_USDC", "1.0"))
+
+# Take-profit: after entering, place a resting limit sell order at a target price.
+# It fills automatically on Kalshi when the market reaches the target — no polling.
+# e.g. enter at 0.60, margin 0.20 → resting sell at 0.80 banks the gain on its own.
+TAKE_PROFIT_MARGIN = float(os.environ.get("TAKE_PROFIT_MARGIN", "0.20"))
+# Optional hard target price (0-1); if set, overrides margin. 0 = use margin.
+TAKE_PROFIT_PRICE = float(os.environ.get("TAKE_PROFIT_PRICE", "0"))
+
+# Take-profit: after entering, place a resting limit sell at entry_price + this.
+# E.g. enter at 0.60, TAKE_PROFIT_TARGET=0.20 → resting sell at 0.80.
+# The order fills automatically when the market rises to the target — no polling.
+# Set to 0 to disable resting take-profits (fall back to the monitor-based scalper).
+TAKE_PROFIT_TARGET = float(os.environ.get("TAKE_PROFIT_TARGET", "0.20"))
+
+
 
 # Cash reserve — always keep this % of bankroll uninvested
 # 50% means never have more than 50% of your balance in open positions

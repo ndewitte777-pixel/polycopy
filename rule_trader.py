@@ -1490,6 +1490,36 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
             size_usdc=size_usdc,
         )
 
+        # Place a RESTING take-profit limit sell so the position banks profit
+        # automatically when the price climbs — no polling/monitoring needed.
+        # e.g. bought at 0.60 → resting sell at 0.80 fills on its own.
+        take_profit_target = None
+        try:
+            from config import TAKE_PROFIT_MARGIN, TAKE_PROFIT_PRICE
+            if TAKE_PROFIT_PRICE > 0:
+                tp_target = TAKE_PROFIT_PRICE
+            else:
+                tp_target = market_price + TAKE_PROFIT_MARGIN
+            # Cap target at 0.97 — can't sell above near-certainty
+            tp_target = min(0.97, round(tp_target, 2))
+
+            if tp_target > market_price:
+                # Contracts held = size / entry price (each contract costs `price`)
+                contracts = max(1, int(size_usdc / market_price))
+                sell_resp = executor.place_limit_sell(
+                    ticker=ticker,
+                    position_side=kalshi_side.lower(),
+                    target_price=tp_target,
+                    count=contracts,
+                )
+                if sell_resp.get("resting") or sell_resp.get("dry_run"):
+                    take_profit_target = tp_target
+                    log.info("📌 Take-profit resting at %.2f (entry %.2f, +%.0f%% gain)",
+                             tp_target, market_price,
+                             ((tp_target - market_price) / market_price * 100))
+        except Exception as e:
+            log.debug("Take-profit placement error: %s", e)
+
         # Track position
         open_lots = state.setdefault("open_lots", {})
         lots = open_lots.get(ticker, [])
@@ -1511,6 +1541,8 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
             "took_profit": False,
             "source": "rule_trader",
             "market_type": market_type,
+            "take_profit_target": take_profit_target,
+            "has_resting_sell": take_profit_target is not None,
         })
         open_lots[ticker] = lots
         state["open_positions"] = state.get("open_positions", 0) + 1

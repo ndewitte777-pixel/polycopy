@@ -163,17 +163,25 @@ def should_exit(lot: dict, current_price: float, game_context: str) -> tuple[boo
     size_usdc = lot.get("size_usdc", 1.0)
 
     # Actual dollar profit: (price move) × (contracts held)
-    # contracts = size_usdc / entry_price
     contracts = size_usdc / entry_price if entry_price > 0 else 1
     dollar_profit = price_change * contracts
 
-    # 25% return target on original bet size
-    # $1 bet → need $0.25 profit; $2 bet → need $0.50 profit
     profit_target = size_usdc * (SCALP_TARGET_RETURN_PCT / 100)
 
-    # 1. Hard stop loss
+    # 1. Hard stop loss — ALWAYS handled by scalper (the resting sell only
+    #    covers the upside; the downside still needs an active stop)
     if pct_change <= HARD_STOP_PCT:
         return True, f"Hard stop loss: {pct_change:.1f}% | ${dollar_profit:.2f}"
+
+    # If a resting take-profit order is already on the book, the scalper does
+    # NOT also sell for profit — it lets the limit order do its job. The scalper
+    # only steps in for stop-loss (above) or forced time exit (below).
+    if lot.get("has_resting_sell"):
+        # Still allow the force-exit-on-time check to run below
+        held_mins = (time.time() - lot.get("opened_at", time.time())) / 60
+        if held_mins >= SCALP_MAX_HOLD_MINS:
+            return True, f"Force exit after {held_mins:.0f}min (resting order didn't fill)"
+        return False, "Resting take-profit order active — letting it fill"
 
     # 2. Near resolution (>0.88) — just hold for full payout
     if current_price >= 0.88:
