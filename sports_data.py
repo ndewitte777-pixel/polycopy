@@ -274,8 +274,9 @@ def match_game_to_market(game: dict, market_question: str,
         elif matched == 1:
             score += 0.4
 
-    # Date check — penalize heavily if ticker date doesn't match game date
-    # This prevents using tonight's score to bet on tomorrow's game
+    # Date check — penalize if ticker date is too far from game date.
+    # Allow ±1 day because games starting late evening ET cross midnight UTC,
+    # so a game ESPN dates 2026-06-23 may have a Kalshi ticker dated 26JUN22.
     if score > 0 and ticker_date_str and game_date:
         month_map = {"JAN":"01","FEB":"02","MAR":"03","APR":"04","MAY":"05",
                      "JUN":"06","JUL":"07","AUG":"08","SEP":"09",
@@ -285,9 +286,21 @@ def match_game_to_market(game: dict, market_question: str,
             ticker_date = (f"20{dm.group(1)}-"
                           f"{month_map.get(dm.group(2), '00')}-"
                           f"{dm.group(3)}")
-            if ticker_date != game_date:
-                # Wrong date — don't match this market at all
-                score = 0.0
+            # Compare as dates with 1-day tolerance
+            try:
+                from datetime import datetime as _dt
+                td = _dt.strptime(ticker_date, "%Y-%m-%d")
+                gd = _dt.strptime(game_date, "%Y-%m-%d")
+                day_diff = abs((td - gd).days)
+                if day_diff == 0:
+                    pass  # exact match, no penalty
+                elif day_diff == 1:
+                    score *= 0.85  # adjacent day (midnight crossover) — small penalty
+                else:
+                    score = 0.0  # 2+ days off — definitely wrong game
+            except ValueError:
+                if ticker_date != game_date:
+                    score = 0.0
 
     # Secondary: question text matching (critical for tennis/UFC player names)
     q_lower = market_question.lower() if market_question else ""

@@ -1213,32 +1213,51 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
             log.info("Rule trader: skipping parlay leg for %s", game_id)
             continue
 
-        # Market price for live games — fetch a fresh real-time price.
-        # The bulk/cached price is often missing ask/bid for live games and
-        # defaults to 0.50, which is WRONG for a blowout. Always re-fetch.
-        cached_yes = float(target_market.get("yes_price", 0) or 0)
-        yes_price = None
-        try:
-            from kalshi_data import get_market_price
-            fresh_yes, fresh_no = get_market_price(ticker)
-            # 0.5 exactly is the failure signal from get_market_price
-            if fresh_yes and fresh_yes != 0.5 and 0.005 < fresh_yes < 0.995:
-                yes_price = fresh_yes
-                log.debug("Fresh live price for %s: %.3f", ticker, fresh_yes)
-        except Exception as e:
-            log.debug("Could not fetch fresh price for %s: %s", ticker, e)
+        # Market price for live games. Try the cached market's own fields first
+        # (the bulk fetch sometimes has them), then a fresh single-market fetch.
+        def _price_from_market(mkt):
+            """Extract a 0-1 yes price from a market dict, trying all fields."""
+            for f in ("yes_ask", "yes_bid", "last_price", "yes_price"):
+                v = mkt.get(f)
+                if v not in (None, "", 0, "0"):
+                    try:
+                        fv = float(v)
+                        fv = fv / 100 if fv > 1 else fv
+                        if 0.005 < fv < 0.995:
+                            return round(fv, 3)
+                    except (ValueError, TypeError):
+                        pass
+            # Derive from no side
+            for f in ("no_ask", "no_bid", "no_price"):
+                v = mkt.get(f)
+                if v not in (None, "", 0, "0"):
+                    try:
+                        fv = float(v)
+                        fv = fv / 100 if fv > 1 else fv
+                        if 0.005 < fv < 0.995:
+                            return round(1 - fv, 3)
+                    except (ValueError, TypeError):
+                        pass
+            return None
 
-        # If fresh fetch failed, try the cached price (but not if it's the 0.5 default)
+        yes_price = _price_from_market(target_market)
+
+        # If cached market had no usable price, fetch fresh
         if yes_price is None:
-            if cached_yes and cached_yes != 0.5 and 0.005 < cached_yes < 0.995:
-                yes_price = cached_yes
-            else:
-                # No reliable price — skip rather than trade on a fake 0.50.
-                # This is critical: betting at a wrong price poisons the data.
-                log.info("Rule trader: skipping %s — no reliable price "
-                         "(fresh fetch failed, cached=%.2f)", game_id, cached_yes)
-                _game_cooldowns[game_id] = now - GAME_COOLDOWN_SECONDS + 120
-                continue
+            try:
+                from kalshi_data import get_market_price
+                fresh_yes, fresh_no = get_market_price(ticker)
+                if fresh_yes and fresh_yes != 0.5 and 0.005 < fresh_yes < 0.995:
+                    yes_price = fresh_yes
+            except Exception as e:
+                log.debug("Could not fetch fresh price for %s: %s", ticker, e)
+
+        if yes_price is None:
+            # No reliable price — skip rather than trade on a fake 0.50.
+            log.info("Rule trader: skipping %s — no reliable price for %s",
+                     game_id, ticker)
+            _game_cooldowns[game_id] = now - GAME_COOLDOWN_SECONDS + 120
+            continue
 
         # Convert to the price for OUR side
         if bet_side in ("NO", "AWAY", "UNDER"):
