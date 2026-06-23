@@ -1213,25 +1213,32 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
             log.info("Rule trader: skipping parlay leg for %s", game_id)
             continue
 
-        # Market price is already a correct 0-1 float (computed in kalshi_data
-        # with proper cents conversion). But for LIVE games the cached price can
-        # be up to 5 min stale, so fetch a fresh real-time price for this ticker.
-        yes_price = float(target_market.get("yes_price", 0.5) or 0.5)
+        # Market price for live games — fetch a fresh real-time price.
+        # The bulk/cached price is often missing ask/bid for live games and
+        # defaults to 0.50, which is WRONG for a blowout. Always re-fetch.
+        cached_yes = float(target_market.get("yes_price", 0) or 0)
+        yes_price = None
         try:
             from kalshi_data import get_market_price
             fresh_yes, fresh_no = get_market_price(ticker)
-            if fresh_yes and 0.01 < fresh_yes < 0.99:
+            # 0.5 exactly is the failure signal from get_market_price
+            if fresh_yes and fresh_yes != 0.5 and 0.005 < fresh_yes < 0.995:
                 yes_price = fresh_yes
-                log.debug("Fresh live price for %s: %.3f (cached was %.3f)",
-                          ticker, fresh_yes, target_market.get("yes_price", 0))
+                log.debug("Fresh live price for %s: %.3f", ticker, fresh_yes)
         except Exception as e:
-            log.debug("Could not fetch fresh price for %s: %s — using cached", ticker, e)
+            log.debug("Could not fetch fresh price for %s: %s", ticker, e)
 
-        # Guard against bad values
-        if yes_price <= 0.01 or yes_price >= 0.99:
-            log.debug("Rule trader: skipping %s — no valid price (%.3f)",
-                      game_id, yes_price)
-            continue
+        # If fresh fetch failed, try the cached price (but not if it's the 0.5 default)
+        if yes_price is None:
+            if cached_yes and cached_yes != 0.5 and 0.005 < cached_yes < 0.995:
+                yes_price = cached_yes
+            else:
+                # No reliable price — skip rather than trade on a fake 0.50.
+                # This is critical: betting at a wrong price poisons the data.
+                log.info("Rule trader: skipping %s — no reliable price "
+                         "(fresh fetch failed, cached=%.2f)", game_id, cached_yes)
+                _game_cooldowns[game_id] = now - GAME_COOLDOWN_SECONDS + 120
+                continue
 
         # Convert to the price for OUR side
         if bet_side in ("NO", "AWAY", "UNDER"):

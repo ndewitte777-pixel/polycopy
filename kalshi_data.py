@@ -233,18 +233,44 @@ def get_market_price(ticker: str) -> tuple[float, float]:
             Handles: int cents (50), float cents (50.0), dollar string ("0.50")
             """
             if raw is None:
-                return 0.5
-            val = float(raw)
+                return None
+            try:
+                val = float(raw)
+            except (ValueError, TypeError):
+                return None
+            if val <= 0:
+                return None
             # If value > 1, it's in cents — divide by 100
             return val / 100 if val > 1 else val
 
-        yes_raw = (m.get("yes_ask") or m.get("yes_bid") or
-                   m.get("yes_price") or m.get("last_price") or 50)
-        no_raw = m.get("no_ask") or m.get("no_bid") or m.get("no_price")
+        # Try to get the YES price from multiple sources, best first
+        yes = (_parse_price(m.get("yes_ask")) or
+               _parse_price(m.get("yes_bid")) or
+               _parse_price(m.get("last_price")) or
+               _parse_price(m.get("yes_price")))
 
-        yes = _parse_price(yes_raw)
-        no = _parse_price(no_raw) if no_raw else round(1 - yes, 3)
+        # If YES is unavailable, derive it from the NO side (yes = 1 - no)
+        if yes is None:
+            no_raw = (_parse_price(m.get("no_ask")) or
+                      _parse_price(m.get("no_bid")) or
+                      _parse_price(m.get("no_price")))
+            if no_raw is not None:
+                yes = round(1 - no_raw, 3)
 
+        # Last resort — use bid/ask midpoint if both exist
+        if yes is None:
+            ya = _parse_price(m.get("yes_ask"))
+            yb = _parse_price(m.get("yes_bid"))
+            if ya and yb:
+                yes = round((ya + yb) / 2, 3)
+
+        if yes is None:
+            log.debug("No price available for %s — fields: yes_ask=%s yes_bid=%s last=%s no_ask=%s",
+                      ticker, m.get("yes_ask"), m.get("yes_bid"),
+                      m.get("last_price"), m.get("no_ask"))
+            return 0.5, 0.5
+
+        no = round(1 - yes, 3)
         log.debug("Price for %s: yes=%.3f no=%.3f", ticker, yes, no)
         return yes, no
     except Exception as e:
