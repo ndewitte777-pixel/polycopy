@@ -1143,8 +1143,27 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
                     target_market = m
 
             if not target_market or best_score < 0.4:
-                log.info("Rule trader: no confident Kalshi match for %s (best=%.2f)",
-                         game_id, best_score)
+                # Diagnostic: show what the best near-miss was so we can see why
+                near_miss = ""
+                try:
+                    candidates = []
+                    for m in expanded_markets:
+                        tk = m.get("ticker", "")
+                        if tk and tk.split("-")[0] in allowed_series:
+                            qq = m.get("question", m.get("title", "")).lower()
+                            sc = match_game_to_market(game, qq, tk)
+                            if sc > 0:
+                                candidates.append((sc, tk))
+                    candidates.sort(reverse=True)
+                    if candidates:
+                        near_miss = " | top candidates: " + ", ".join(
+                            f"{tk}({sc:.2f})" for sc, tk in candidates[:3])
+                    else:
+                        near_miss = f" | no {sport} markets matched any score (series={allowed_series[:3]})"
+                except Exception as _e:
+                    near_miss = f" | diag error: {_e}"
+                log.info("Rule trader: no confident Kalshi match for %s (best=%.2f)%s",
+                         game_id, best_score, near_miss)
                 # Set a short cooldown so we don't spam this every 20s
                 _game_cooldowns[game_id] = now - GAME_COOLDOWN_SECONDS + 120  # retry in 2 min
                 continue
