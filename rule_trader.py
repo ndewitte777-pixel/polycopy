@@ -1194,9 +1194,31 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
             log.info("Rule trader: skipping parlay leg for %s", game_id)
             continue
 
-        market_price = target_market.get("yes_price", 0.5)
+        # Market price is already a correct 0-1 float (computed in kalshi_data
+        # with proper cents conversion). But for LIVE games the cached price can
+        # be up to 5 min stale, so fetch a fresh real-time price for this ticker.
+        yes_price = float(target_market.get("yes_price", 0.5) or 0.5)
+        try:
+            from kalshi_data import get_market_price
+            fresh_yes, fresh_no = get_market_price(ticker)
+            if fresh_yes and 0.01 < fresh_yes < 0.99:
+                yes_price = fresh_yes
+                log.debug("Fresh live price for %s: %.3f (cached was %.3f)",
+                          ticker, fresh_yes, target_market.get("yes_price", 0))
+        except Exception as e:
+            log.debug("Could not fetch fresh price for %s: %s — using cached", ticker, e)
+
+        # Guard against bad values
+        if yes_price <= 0.01 or yes_price >= 0.99:
+            log.debug("Rule trader: skipping %s — no valid price (%.3f)",
+                      game_id, yes_price)
+            continue
+
+        # Convert to the price for OUR side
         if bet_side in ("NO", "AWAY", "UNDER"):
-            market_price = 1 - market_price
+            market_price = 1 - yes_price
+        else:
+            market_price = yes_price
 
         # Skip extreme or low-value odds
         if market_price < MIN_BET_PRICE or market_price > MAX_BET_PRICE:
@@ -1248,20 +1270,6 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
                          MIN_PROFIT_USDC, size_for_profit)
                 continue
 
-        # Get real current market price from the matched market
-        # Need preliminary kalshi_side to know which price to use
-        _prelim_side = "yes" if bet_side in ("YES", "HOME", "OVER") else "no"
-        real_yes = (float(target_market.get("yes_ask") or
-                         target_market.get("yes_bid") or
-                         target_market.get("yes_price") or 0) / 100
-                    if (target_market.get("yes_ask") or "") != "" else 0)
-        if not real_yes or real_yes <= 0.01 or real_yes >= 0.99:
-            real_yes = market_price
-
-        if _prelim_side == "yes" and real_yes > 0.01:
-            market_price = real_yes
-        elif _prelim_side == "no" and real_yes > 0.01:
-            market_price = 1 - real_yes
         try:
             spread_line_val = best.get("spread_line", 1.5)
             eval_result = sm.evaluate_signal(
