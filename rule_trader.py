@@ -1069,7 +1069,22 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
                 if match_score < 0.4:
                     continue
 
-                if market_type == "TOTAL" and any(w in q for w in ["over", "under", "total", "goals", "runs", "points"]):
+                # CRITICAL: the market's type MUST match the signal's type.
+                # A TOTAL signal can only bet a TOTAL market, WIN→WIN, SPREAD→SPREAD.
+                # Without this, a TOTAL bet could land on a "Winner?" market.
+                q_is_total = any(w in q for w in ["over", "under", "total", "goals", "runs scored", "total runs", "total points", "total goals"])
+                q_is_spread = "spread" in q or "by more than" in q or "margin" in q
+                q_is_win = ("winner" in q or "to win" in q or "win?" in q) and not q_is_total and not q_is_spread
+
+                # Verify the market matches the signal type; if not, skip it
+                if market_type == "TOTAL" and not q_is_total:
+                    continue
+                if market_type == "SPREAD" and not q_is_spread:
+                    continue
+                if market_type == "WIN" and not q_is_win:
+                    continue
+
+                if market_type == "TOTAL" and q_is_total:
                     import re as _re2
                     ticker_line_match = _re2.search(r'-(\d+\.?\d*)$', ticker)
                     line_val = float(ticker_line_match.group(1)) if ticker_line_match else 999
@@ -1115,7 +1130,7 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
                         match_score += 0.5
                     else:
                         match_score += 0.20 + proximity * 0.15
-                elif market_type == "SPREAD" and "spread" in q:
+                elif market_type == "SPREAD" and q_is_spread:
                     # Filter spread lines — only realistic margins
                     # Extract the number from question e.g. "wins by more than 3.5" → 3.5
                     import re as _re
@@ -1132,7 +1147,7 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
                                      line_val, max_spread, ticker)
                             continue  # skip this market, too big a spread
                     match_score += 0.25
-                elif market_type == "WIN" and not any(w in q for w in ["spread", "over", "under", "total", "goal", "hit", "strikeout"]):
+                elif market_type == "WIN" and q_is_win:
                     match_score += 0.15
 
                 if team and team.lower().split()[-1] in q:
