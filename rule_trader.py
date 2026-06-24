@@ -1069,7 +1069,7 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
                 if match_score < 0.4:
                     continue
 
-                if market_type == "TOTAL" and any(w in q for w in ["over", "under", "total", "goals", "runs", "points", "winner"]):
+                if market_type == "TOTAL" and any(w in q for w in ["over", "under", "total", "goals", "runs", "points"]):
                     import re as _re2
                     ticker_line_match = _re2.search(r'-(\d+\.?\d*)$', ticker)
                     line_val = float(ticker_line_match.group(1)) if ticker_line_match else 999
@@ -1153,13 +1153,14 @@ def run_rule_trader(live_games: list, all_kalshi_markets: list,
                             qq = m.get("question", m.get("title", "")).lower()
                             sc = match_game_to_market(game, qq, tk)
                             if sc > 0:
-                                candidates.append((sc, tk))
+                                candidates.append((sc, tk, qq[:30]))
                     candidates.sort(reverse=True)
                     if candidates:
-                        near_miss = " | top candidates: " + ", ".join(
-                            f"{tk}({sc:.2f})" for sc, tk in candidates[:3])
+                        near_miss = (f" | signal={market_type}/{bet_side} | "
+                                     "top: " + ", ".join(
+                                     f"{tk}({sc:.2f},'{qq}')" for sc, tk, qq in candidates[:2]))
                     else:
-                        near_miss = f" | no {sport} markets matched any score (series={allowed_series[:3]})"
+                        near_miss = f" | no {sport} markets matched (series={allowed_series[:3]})"
                 except Exception as _e:
                     near_miss = f" | diag error: {_e}"
                 log.info("Rule trader: no confident Kalshi match for %s (best=%.2f)%s",

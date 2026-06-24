@@ -1693,3 +1693,127 @@ def nhl_spread_probability(period: int, mins_remaining: float,
         "no_cover": round(1 - cover_prob, 3),
         "expected_margin": round(expected_final_diff, 1),
     }
+
+
+# ─────────────────────────────────────────────
+#  PRE-GAME MODEL (records + ESPN odds)
+# ─────────────────────────────────────────────
+
+def _parse_record(rec_str: str):
+    """Parse '45-30' → (wins, losses, win_pct). Returns None if unparseable."""
+    try:
+        import re
+        m = re.match(r'(\d+)-(\d+)', rec_str.strip())
+        if m:
+            w, l = int(m.group(1)), int(m.group(2))
+            total = w + l
+            return (w, l, w / total if total > 0 else 0.5)
+    except Exception:
+        pass
+    return None
+
+
+def pregame_win_probability(team_record: str, opp_record: str,
+                            is_home: bool, ml_odds=None) -> float:
+    """
+    Estimate pre-game win probability from team records + home advantage.
+    This is intentionally simple — it will rarely beat the market price,
+    which is exactly what the dry-run will reveal.
+
+    If ESPN moneyline odds are available, use those (they reflect the market's
+    own estimate and are more accurate than a record-based guess).
+    """
+    # If we have moneyline odds, convert to implied probability (most accurate)
+    if ml_odds is not None:
+        try:
+            ml = float(ml_odds)
+            if ml < 0:
+                implied = (-ml) / ((-ml) + 100)
+            else:
+                implied = 100 / (ml + 100)
+            return max(0.05, min(0.95, implied))
+        except (ValueError, TypeError):
+            pass
+
+    # Fallback: record-based estimate (weak, will rarely find an edge)
+    my_rec = _parse_record(team_record)
+    opp_rec = _parse_record(opp_record)
+
+    if not my_rec or not opp_rec:
+        return 0.5  # no data — coin flip, no edge
+
+    my_pct = my_rec[2]
+    opp_pct = opp_rec[2]
+
+    # Log5 formula (Bill James) — probability team A beats team B given win pcts
+    if my_pct + opp_pct == 0:
+        base = 0.5
+    elif my_pct == opp_pct == 1.0:
+        base = 0.5
+    else:
+        denom = my_pct + opp_pct - 2 * my_pct * opp_pct
+        base = (my_pct - my_pct * opp_pct) / denom if denom != 0 else 0.5
+
+    # Home field advantage (~4% in MLB, more in NBA/NFL)
+    if is_home:
+        base += 0.035
+    else:
+        base -= 0.035
+
+    return max(0.05, min(0.95, base))
+
+
+def pregame_evaluate(game: dict, market_price: float,
+                     signal_type: str, signal_side: str,
+                     bet_team_idx: int = 0) -> dict:
+    """
+    Evaluate a PRE-GAME bet. Returns true_prob, edge, and whether to trade.
+
+    Only recommends a trade when the model's probability meaningfully diverges
+    from the market price — because betting at the market price (fair value)
+    pre-game is a guaranteed slow loss to the spread.
+    """
+    teams = game.get("teams", [])
+    if len(teams) < 2:
+        return {"true_prob": 0.5, "edge": 0.0, "should_trade": False,
+                "reason": "no team data"}
+
+    reason_parts = []
+    true_prob = 0.5
+
+    if signal_type == "WIN":
+        bet_team = teams[bet_team_idx]
+        opp_team = teams[1 - bet_team_idx]
+        is_home = bet_team.get("home_away") == "home"
+        true_prob = pregame_win_probability(
+            bet_team.get("record", ""),
+            opp_team.get("record", ""),
+            is_home,
+            bet_team.get("ml_odds"),
+        )
+        reason_parts.append(
+            f"Pregame: {bet_team.get('abbreviation')} "
+            f"({bet_team.get('record','?')}) vs "
+            f"{opp_team.get('abbreviation')} ({opp_team.get('record','?')}) "
+            f"→ {true_prob:.1%} win prob"
+        )
+
+    # Edge = our probability minus what we'd pay
+    edge = true_prob - market_price
+
+    # REQUIRE a meaningful gap — pregame at fair value is a guaranteed loss.
+    # Need at least 8% edge to overcome the inherent disadvantage.
+    MIN_PREGAME_EDGE = 0.08
+    should_trade = edge >= MIN_PREGAME_EDGE
+
+    if not should_trade:
+        reason_parts.append(
+            f"edge {edge*100:+.1f}% below {MIN_PREGAME_EDGE*100:.0f}% pregame floor"
+        )
+
+    return {
+        "true_prob": round(true_prob, 3),
+        "edge": round(edge, 3),
+        "should_trade": should_trade,
+        "reason": " | ".join(reason_parts),
+    }

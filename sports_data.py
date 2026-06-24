@@ -136,12 +136,23 @@ def parse_espn_event(event: dict, sport: str) -> dict | None:
         teams = []
         for c in competitors:
             team = c.get("team", {})
+            # Team record (e.g. "45-30") — useful pregame signal
+            records = c.get("records", [])
+            overall_record = ""
+            for rec in records:
+                if rec.get("type") == "total" or rec.get("name") == "overall":
+                    overall_record = rec.get("summary", "")
+                    break
+            if not overall_record and records:
+                overall_record = records[0].get("summary", "")
             teams.append({
                 "name": team.get("displayName") or team.get("name", "?"),
                 "abbreviation": team.get("abbreviation", "?"),
                 "score": c.get("score", "0"),
                 "home_away": c.get("homeAway", "?"),
                 "winner": c.get("winner", False),
+                "record": overall_record,
+                "ml_odds": c.get("odds", {}).get("moneyLine", None) if isinstance(c.get("odds"), dict) else None,
             })
 
         # Key stats / situation
@@ -182,6 +193,9 @@ def parse_espn_event(event: dict, sport: str) -> dict | None:
             "possession": possession,
             "spread": spread,
             "over_under": over_under,
+            "is_pregame": state == "pre",
+            "espn_spread": spread,
+            "espn_total": over_under,
             "raw_name": name,
             "game_date": game_date,
             # Unique game ID includes date to distinguish series games

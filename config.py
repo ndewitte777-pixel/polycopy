@@ -14,6 +14,12 @@ import os
 _targets_env = os.environ.get("TARGET_WALLETS", "")
 TARGET_WALLETS = [w.strip().lower() for w in _targets_env.split(",") if w.strip()]
 
+# Master switch for Polymarket copy trading. Set USE_COPY_TRADING=false in Railway
+# to disable copying the wallets (e.g. to test only the rule trader).
+USE_COPY_TRADING = os.environ.get("USE_COPY_TRADING", "true").lower() == "true"
+# Master switch for the Kalshi smart-money copy engine.
+USE_KALSHI_COPY = os.environ.get("USE_KALSHI_COPY", "true").lower() == "true"
+
 # ---- Polling ----
 POLL_INTERVAL_SECONDS = 15        # how often to check for new activity
 ACTIVITY_LOOKBACK_SECONDS = 120   # window to consider "new"
@@ -208,3 +214,12 @@ ERROR_ALERT_THRESHOLD = int(os.environ.get("ERROR_ALERT_THRESHOLD", "3"))
 # Day of week for weekly summary (0=Monday, 6=Sunday)
 WEEKLY_REPORT_DAY = 6
 WEEKLY_REPORT_HOUR = 9  # 9am UTC
+
+# Pre-game betting (separate from live rule trader).
+# Uses ESPN records + odds and the math models to bet before games start.
+# WARNING: pregame markets are efficient — this is the hardest place to find
+# an edge. Enabled for testing; the journal tracks it as its own stream so you
+# can see whether it actually wins. Gated on a meaningful model-vs-price gap.
+ENABLE_PREGAME = os.environ.get("ENABLE_PREGAME", "true").lower() == "true"
+PREGAME_MIN_EDGE = float(os.environ.get("PREGAME_MIN_EDGE", "0.08"))
+PREGAME_MAX_TRADES = int(os.environ.get("PREGAME_MAX_TRADES", "10"))
