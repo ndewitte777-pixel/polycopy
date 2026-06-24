@@ -762,7 +762,8 @@ def run():
                 last_balance_check = now
 
             # ── Copy trade detection ──────────────────────────────────────
-            for wallet in TARGET_WALLETS:
+            from config import USE_COPY_TRADING
+            for wallet in (TARGET_WALLETS if USE_COPY_TRADING else []):
                 wallet = wallet.lower()
                 activity = data_api.get_activity(wallet, limit=20, types=("TRADE",))
                 if not activity:
@@ -853,7 +854,9 @@ def run():
 
                 # Kalshi-native copy trading — watch smart money on Kalshi directly
                 # Reuse markets already fetched above, or fetch fresh if needed
-                try:
+                from config import USE_KALSHI_COPY
+                if USE_KALSHI_COPY:
+                  try:
                     kc_markets = short_t + long_t if 'short_t' in dir() else []
                     if not kc_markets:
                         from kalshi_data import get_markets, format_markets_for_claude
@@ -870,7 +873,7 @@ def run():
                     )
                     if kc_opened:
                         log.info("Kalshi copy: %d new positions", kc_opened)
-                except Exception as _kc_err:
+                  except Exception as _kc_err:
                     log.debug("Kalshi copy error: %s", _kc_err)
 
                 # Check and cancel timed-out resting orders
